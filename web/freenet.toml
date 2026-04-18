@@ -2,9 +2,6 @@
 type = "webapp"
 lang = "rust"
 
-[webapp]
-lang = "typescript"
-
 [webapp.state-sources]
 source_dirs = ["dist"]
 

@@ -1,33 +1,31 @@
-// Reset — full design system comes in Phase 3
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
+// ============================================================================
+// Freenet Microblogging — Design System
+// Main entry point: imports all partials in order
+// ============================================================================
 
-:root {
-  --bg-primary: #f8fafc;
-  --bg-elevated: #ffffff;
-  --text-primary: #000000;
-  --text-secondary: #374151;
-  --text-muted: #64748b;
-  --accent: #0066cc;
-  --border: rgba(0, 0, 0, 0.06);
-}
+// 1. Design tokens (CSS custom properties)
+@use 'variables';
 
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    Helvetica, Arial, sans-serif;
-  background: var(--bg-primary);
-  color: var(--text-secondary);
-  line-height: 1.4;
-  font-size: 15px;
-}
+// 2. Minimal reset
+@use 'reset';
 
-#app {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-}
+// 3. Layout: 3-column grid
+@use 'layout';
+
+// 4. Sidebar: logo, nav, post CTA
+@use 'sidebar';
+
+// 5. Feed: tab bar, compose box, post cards
+@use 'feed';
+
+// 6. Right panel: search, trending, who to follow
+@use 'right-panel';
+
+// 7. All button variants
+@use 'buttons';
+
+// 8. Dark mode overrides
+@use 'dark-mode';
+
+// 9. Responsive breakpoints, bottom nav, FAB
+@use 'responsive';
