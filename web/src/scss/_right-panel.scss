@@ -1,0 +1,203 @@
+// Right panel: search, trending card, who to follow
+
+.right-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-top: 12px;
+}
+
+// Search box
+.search-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.search-box__icon {
+  position: absolute;
+  left: 14px;
+  font-size: 18px;
+  color: var(--text-muted);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+}
+
+.search-box__input {
+  width: 100%;
+  height: 44px;
+  padding: 0 16px 0 44px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  font-size: var(--font-size-base);
+  font-weight: 400;
+  border: 1px solid transparent;
+  transition: border-color 0.15s ease, background 0.15s ease;
+
+  &::placeholder {
+    color: var(--text-muted);
+  }
+
+  &:focus {
+    background: var(--bg-elevated);
+    border-color: var(--accent);
+    outline: none;
+
+    & + .search-box__icon,
+    ~ .search-box__icon {
+      color: var(--accent);
+    }
+  }
+}
+
+// Trending & Who-to-Follow cards share a common container
+.panel-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+}
+
+.panel-card__header {
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-card__title {
+  font-size: var(--font-size-section);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+// Trending items
+.trending-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+
+  &:hover {
+    background: var(--bg-hover);
+  }
+
+  &:not(:last-child) {
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+.trending-item__category {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.trending-item__topic {
+  font-size: var(--font-size-base);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.trending-item__count {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+// Who to follow items
+.follow-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+
+  &:hover {
+    background: var(--bg-hover);
+  }
+
+  &:not(:last-child) {
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+.follow-item__avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--bg-hover);
+  flex-shrink: 0;
+  overflow: hidden;
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+}
+
+.follow-item__info {
+  flex: 1;
+  min-width: 0;
+}
+
+.follow-item__name {
+  font-size: var(--font-size-base);
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.follow-item__handle {
+  font-size: var(--font-size-base);
+  font-weight: 400;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+// "Show more" link at bottom of cards
+.panel-card__more {
+  display: block;
+  padding: 14px 16px;
+  font-size: var(--font-size-base);
+  font-weight: 400;
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 0.15s ease;
+
+  &:hover {
+    background: var(--bg-hover);
+    text-decoration: none;
+  }
+}
+
+// Footer links
+.right-panel-footer {
+  padding: 0 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.right-panel-footer__link {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-muted);
+  cursor: pointer;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}

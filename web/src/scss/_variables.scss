@@ -1,0 +1,44 @@
+// Design tokens — CSS custom properties
+// All color, spacing, and typography values defined here.
+
+:root {
+  // Backgrounds
+  --bg-primary: #F8FAFC;
+  --bg-elevated: #FFFFFF;
+  --bg-hover: #F0F4F8;
+
+  // Text
+  --text-primary: #000000;
+  --text-secondary: #374151;
+  --text-muted: #64748B;
+
+  // Accent / interactive
+  --accent: #0066CC;
+  --accent-hover: #004C99;
+  --accent-soft: rgba(0, 102, 204, 0.10);
+
+  // Semantic
+  --success: #339966;
+  --error: #DC2626;
+
+  // Borders
+  --border: rgba(0, 0, 0, 0.06);
+  --border-strong: #E5E7EB;
+
+  // Layout
+  --sidebar-width: 275px;
+  --right-panel-width: 350px;
+
+  // Radius
+  --radius-pill: 9999px;
+  --radius-card: 16px;
+
+  // Typography
+  --font-stack: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-size-base: 15px;
+  --font-size-nav: 20px;
+  --font-size-section: 20px;
+  --font-size-logo: 22px;
+  --font-size-post-btn: 17px;
+  --line-height-base: 1.4;
+}

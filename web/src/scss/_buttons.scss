@@ -1,0 +1,146 @@
+// All button variants
+
+// ── Base ──────────────────────────────────────────────────────────────────────
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-family: var(--font-stack);
+  font-size: var(--font-size-base);
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  border: none;
+  border-radius: var(--radius-pill);
+  transition: opacity 0.15s ease, background 0.15s ease, transform 0.1s ease;
+  white-space: nowrap;
+  text-decoration: none;
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+}
+
+// ── Primary (Post / CTA) ──────────────────────────────────────────────────────
+// Used for the main sidebar Post button
+.btn--primary {
+  padding: 12px 24px;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
+  color: #ffffff;
+  font-size: var(--font-size-post-btn);
+  border-radius: var(--radius-pill);
+
+  &:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+}
+
+// ── Post Inline ───────────────────────────────────────────────────────────────
+// Used in compose box and reply dialogs
+.btn--post {
+  padding: 8px 20px;
+  background: var(--accent);
+  color: #ffffff;
+  font-size: var(--font-size-base);
+  border-radius: 20px;
+
+  &:hover:not(:disabled) {
+    background: var(--accent-hover);
+  }
+}
+
+// ── Follow ────────────────────────────────────────────────────────────────────
+// Light: black bg / white text  |  Dark: white bg / black text
+.btn--follow {
+  padding: 8px 20px;
+  background: var(--text-primary);
+  color: var(--bg-elevated);
+  font-size: var(--font-size-base);
+  border-radius: 20px;
+
+  &:hover:not(:disabled) {
+    opacity: 0.85;
+  }
+}
+
+// ── Unfollow (outline variant) ────────────────────────────────────────────────
+.btn--unfollow {
+  padding: 7px 19px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--font-size-base);
+  border-radius: 20px;
+  border: 1px solid var(--border-strong);
+
+  &:hover:not(:disabled) {
+    border-color: var(--error);
+    color: var(--error);
+    background: rgba(220, 38, 38, 0.05);
+  }
+}
+
+// ── Ghost / Text ──────────────────────────────────────────────────────────────
+.btn--ghost {
+  padding: 8px 16px;
+  background: transparent;
+  color: var(--text-muted);
+
+  &:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+  }
+}
+
+// ── Icon button (circle) ──────────────────────────────────────────────────────
+.btn--icon {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 18px;
+
+  &:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+  }
+
+  // Color variants on hover (used in action bars)
+  &.btn--icon-accent:hover:not(:disabled) {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+
+  &.btn--icon-success:hover:not(:disabled) {
+    background: rgba(51, 153, 102, 0.12);
+    color: var(--success);
+  }
+
+  &.btn--icon-error:hover:not(:disabled) {
+    background: rgba(220, 38, 38, 0.10);
+    color: var(--error);
+  }
+}
+
+// ── Size modifiers ────────────────────────────────────────────────────────────
+.btn--sm {
+  padding: 6px 16px;
+  font-size: 14px;
+}
+
+.btn--lg {
+  padding: 14px 28px;
+  font-size: var(--font-size-post-btn);
+}
+
+.btn--full {
+  width: 100%;
+}
