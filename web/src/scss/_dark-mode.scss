@@ -1,0 +1,134 @@
+// Dark mode overrides — applied via [data-theme="dark"] on <html> or <body>
+
+[data-theme="dark"] {
+  // Backgrounds
+  --bg-primary: #000000;
+  --bg-elevated: #16181C;
+  --bg-hover: #1D1F23;
+
+  // Text
+  --text-primary: #FFFFFF;
+  --text-secondary: #E0E0E0;
+  --text-muted: #94A3B8;
+
+  // Accent / interactive
+  --accent: #4DA6FF;
+  --accent-hover: #80BFFF;
+  --accent-soft: rgba(77, 166, 255, 0.16);
+
+  // Semantic
+  --success: #4DCC8F;
+  --error: #EF4444;
+
+  // Borders
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: #2F3336;
+
+  // Component-specific overrides
+
+  // Sidebar background — same as body bg in dark mode
+  .sidebar {
+    background: var(--bg-primary);
+    border-right-color: var(--border-strong);
+  }
+
+  // Feed header — slightly transparent for blur
+  .feed-header {
+    background: rgba(0, 0, 0, 0.65);
+  }
+
+  // Post cards
+  .post-card {
+    background: var(--bg-elevated);
+
+    &:hover {
+      background: var(--bg-hover);
+    }
+  }
+
+  // Compose box
+  .compose-box {
+    background: var(--bg-elevated);
+  }
+
+  // Panel cards
+  .panel-card {
+    background: var(--bg-elevated);
+    border-color: var(--border-strong);
+  }
+
+  // Search input
+  .search-box__input {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+
+    &:focus {
+      background: var(--bg-elevated);
+    }
+  }
+
+  // Follow button inverts: white bg / black text in dark mode
+  .btn--follow {
+    background: var(--text-primary); // #FFFFFF in dark
+    color: #000000;
+
+    &:hover:not(:disabled) {
+      opacity: 0.85;
+    }
+  }
+
+  // Unfollow outline
+  .btn--unfollow {
+    border-color: var(--border-strong);
+    color: var(--text-primary);
+  }
+
+  // Primary button keeps gradient but uses dark-mode accent
+  .btn--primary,
+  .sidebar-post-btn {
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
+    color: #000000;
+  }
+
+  // Post inline button
+  .btn--post {
+    background: var(--accent);
+    color: #000000;
+
+    &:hover:not(:disabled) {
+      background: var(--accent-hover);
+    }
+  }
+
+  // Sidebar logo gradient stays vibrant
+  .sidebar-logo__icon {
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
+    color: #000000;
+  }
+
+  // Tab bar active indicator
+  .tab-bar__tab--active::after {
+    background: var(--accent);
+  }
+
+  // Action hover backgrounds in dark
+  .post-action--repost:hover .post-action__icon-wrap {
+    background: rgba(77, 204, 143, 0.14);
+  }
+
+  .post-action--like:hover .post-action__icon-wrap {
+    background: rgba(239, 68, 68, 0.14);
+  }
+
+  // Bottom nav (mobile)
+  .bottom-nav {
+    background: var(--bg-elevated);
+    border-top-color: var(--border-strong);
+  }
+
+  // FAB in dark mode
+  .fab-compose {
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
+    color: #000000;
+  }
+}

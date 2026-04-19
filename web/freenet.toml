@@ -1,0 +1,9 @@
+[contract]
+type = "webapp"
+lang = "rust"
+
+[webapp.state-sources]
+source_dirs = ["dist"]
+
+[webapp.dependencies]
+posts = { path = "../contracts/posts" }

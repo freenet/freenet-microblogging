@@ -1,0 +1,31 @@
+// ============================================================================
+// Freenet Microblogging — Design System
+// Main entry point: imports all partials in order
+// ============================================================================
+
+// 1. Design tokens (CSS custom properties)
+@use 'variables';
+
+// 2. Minimal reset
+@use 'reset';
+
+// 3. Layout: 3-column grid
+@use 'layout';
+
+// 4. Sidebar: logo, nav, post CTA
+@use 'sidebar';
+
+// 5. Feed: tab bar, compose box, post cards
+@use 'feed';
+
+// 6. Right panel: search, trending, who to follow
+@use 'right-panel';
+
+// 7. All button variants
+@use 'buttons';
+
+// 8. Dark mode overrides
+@use 'dark-mode';
+
+// 9. Responsive breakpoints, bottom nav, FAB
+@use 'responsive';

@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["contracts/*", "delegates/*", "web/container"]
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = true
+opt-level = 's'
+debug = false
+codegen-units = 1
+panic = 'abort'
+
+[workspace.dependencies]
+freenet-stdlib = { version = "0.6.0", default-features = false, features = ["contract"] }
+
+#[target.wasm32-unknown-unknown]
+#rustflags = ["-C", "link-arg=--import-memory"]
