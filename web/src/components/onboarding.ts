@@ -5,6 +5,8 @@
  * with inline styles so no SCSS changes are needed.
  */
 
+import { APP_NAME } from "../branding";
+
 export function createOnboarding(
   onComplete: (displayName: string, secretKey?: string) => void
 ): HTMLElement {
@@ -19,15 +21,15 @@ export function createOnboarding(
   const card = document.createElement("div");
   card.className = "onboarding-card";
 
-  // Freenet logo mark
+  // App logo mark — first character of the app name
   const logo = document.createElement("div");
   logo.className = "onboarding-logo";
-  logo.textContent = "F";
+  logo.textContent = APP_NAME.charAt(0).toUpperCase();
 
   // Title
   const title = document.createElement("h1");
   title.className = "onboarding-title";
-  title.textContent = "Welcome to Freenet";
+  title.textContent = `Welcome to ${APP_NAME}`;
 
   // Subtitle
   const subtitle = document.createElement("p");

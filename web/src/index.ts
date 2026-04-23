@@ -1,4 +1,5 @@
 import "./scss/styles.scss";
+import { APP_NAME } from "./branding";
 import { createApp } from "./app";
 import { FreenetConnection } from "./freenet-api";
 import { Post } from "./types";
@@ -13,6 +14,8 @@ import {
 } from "./identity";
 import { parseDelegateResponse } from "./delegate-api";
 import { DelegateResponse } from "@freenetorg/freenet-stdlib";
+
+document.title = APP_NAME;
 
 const appRoot = document.getElementById("app")!;
 

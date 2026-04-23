@@ -5,6 +5,7 @@
     "moduleResolution": "bundler",
     "strict": true,
     "noImplicitAny": true,
+    "resolveJsonModule": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noImplicitReturns": true,
@@ -15,5 +16,5 @@
     "outDir": "./dist",
     "types": ["vite/client"]
   },
-  "include": ["src"]
+  "include": ["src", "branding/app.json"]
 }

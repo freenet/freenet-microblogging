@@ -1,3 +1,4 @@
+import { APP_NAME } from "../branding";
 import { toggleTheme } from "../theme";
 import { getIdentity } from "../identity";
 
@@ -55,7 +56,7 @@ export function createSidebar(callbacks?: SidebarCallbacks): HTMLElement {
 
   const logoText = document.createElement("span");
   logoText.className = "sidebar-logo__text";
-  logoText.textContent = "freenet";
+  logoText.textContent = APP_NAME.toLowerCase();
 
   logo.appendChild(logoCircle);
   logo.appendChild(logoText);
