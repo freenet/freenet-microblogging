@@ -13,7 +13,7 @@ codegen-units = 1
 panic = 'abort'
 
 [workspace.dependencies]
-freenet-stdlib = { version = "0.6.0", default-features = false, features = ["contract"] }
+freenet-stdlib = { version = "0.6.1", default-features = false, features = ["contract"] }
 
 #[target.wasm32-unknown-unknown]
 #rustflags = ["-C", "link-arg=--import-memory"]
