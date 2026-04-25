@@ -1,0 +1,50 @@
+name: check-contract-wasm
+
+on:
+  pull_request:
+    paths:
+      - "web/**"
+      - "contracts/**"
+      - "delegates/**"
+      - "tools/web-container-sign/**"
+      - "Makefile.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+
+env:
+  FDEV_VERSION: "0.6.0"
+
+jobs:
+  verify-published-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install GNU tar
+        run: |
+          if ! tar --version | grep -qi 'gnu tar'; then
+            sudo apt-get update && sudo apt-get install -y tar
+          fi
+      - name: Install cargo-make + fdev
+        run: |
+          cargo install cargo-make --locked
+          cargo install fdev --version ${{ env.FDEV_VERSION }} --locked
+      - name: Rebuild test-signed contract
+        run: cargo make update-published-contract
+      - name: Verify published-contract/ matches HEAD
+        run: |
+          if ! git diff --quiet -- published-contract/; then
+            echo "::error::published-contract/ does not match a fresh build at HEAD"
+            git diff --stat -- published-contract/
+            git diff -- published-contract/contract-id.txt
+            exit 1
+          fi
+          echo "published-contract/ matches HEAD ✓"

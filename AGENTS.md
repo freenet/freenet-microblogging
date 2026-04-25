@@ -13,28 +13,42 @@ TypeScript SDK for WebSocket communication with a Freenet node.
 
 ```bash
 # Build
-make build                  # Full build (contracts + web + publish)
-make posts                  # Build posts contract (Rust → WASM)
-make follows                # Build follows contract (Rust → WASM)
-make identity               # Build identity delegate (Rust → WASM)
-make webapp                 # Build web app (TypeScript → Vite bundle)
-make publish-posts          # Publish posts contract to local node
-make publish-follows        # Publish follows contract to local node
-make publish-webapp         # Publish web app to local node
+cargo make build                # Full build: contracts + UI + web container
+cargo make build-contracts      # Posts + follows + likes + identity (WASM + code hashes)
+cargo make build-ui             # Vite/TypeScript build (depends on build-contracts)
+cargo make build-web-container  # web/container Rust → WASM
+cargo make build-ui-offline     # Vite build with mock data (no Freenet node) — for CI
+
+# Publish (local node)
+cargo make publish-posts        # Publish posts contract
+cargo make publish-follows      # Publish follows contract
+cargo make publish-likes        # Publish likes contract
+cargo make publish-identity     # Publish identity delegate
+cargo make publish-webapp-test  # Publish test-signed webapp from published-contract/
+cargo make publish-all          # End-to-end: build → sign-test → snapshot → publish all
+
+# Publish (PRODUCTION — use scripts/release.sh, not directly)
+cargo make publish-production   # Build → sign with prod key → snapshot → publish to live network
+
+# Release
+scripts/release.sh 0.1.0        # End-to-end release driver (preflight + 3 confirmation gates)
 
 # Development
-cd web && npm run dev       # Vite dev server on :8080
-cd web && npm test          # Run Vitest tests
-cd web && npm run build     # Vite build only (no fdev)
+cd web && npm run dev           # Vite dev server on :8080
+cargo make dev-offline          # Vite dev server with mock data (no node required)
 
 # Quality
-make test                   # Run all tests (Rust + web)
-make check                  # Type check (cargo check + tsc)
+cargo make test                 # Rust tests + Vitest
+cargo make clippy               # Workspace clippy, deny warnings
+cargo make fmt-check            # cargo fmt --check
+cargo make check                # cargo check + tsc --noEmit
+
+# Playwright
+cargo make test-ui-playwright-setup  # One-time browser install
+cargo make test-ui-playwright        # Run E2E suite
 
 # Node
-make node                   # Build tools + run local Freenet node
-make run-node               # Run local node (tools already installed)
-make build-tool             # Install freenet + fdev via cargo
+cargo make run-node             # Local Freenet node
 ```
 
 ### Repository Structure
@@ -92,7 +106,7 @@ freenet-microblogging/
 │   ├── tsconfig.json
 │   └── freenet.toml
 ├── Cargo.toml                  # Workspace root
-├── Makefile                    # Build orchestration
+├── Makefile.toml               # Build orchestration (cargo-make)
 ├── DESIGN.md                   # Visual design system specification
 ├── CLAUDE.md                   # → points to this file
 └── AGENTS.md                   # This file (single source of truth)
@@ -139,31 +153,45 @@ freenet-microblogging/
 ### Build Flow
 
 ```
-contracts/posts/src/lib.rs
-    → fdev build → WASM binary
-    → fdev inspect → code hash → web/model_code_hash.txt
-
-contracts/follows/src/lib.rs
-    → fdev build → WASM binary
+contracts/{posts,follows,likes}/src/lib.rs
+    → fdev build → WASM
+    → fdev inspect → code hash → build/<name>_code_hash
+    (posts hash also mirrored to web/model_code_hash.txt for vite.config.ts)
 
 delegates/identity/src/lib.rs
-    → fdev build --package-type delegate → WASM binary
+    → fdev build --package-type delegate → WASM
+    → b3sum-derived delegate key → web/delegate_key{,_bytes,_code_hash_bytes}.{txt,json}
 
 web/src/index.ts
-    → vite build (reads model_code_hash.txt via define config)
-    → dist/assets/index-[hash].js
-    → fdev build → web container WASM
-    → fdev publish → deployed to local node
+    → vite build (defines: __MODEL_CONTRACT__, __DELEGATE_KEY__, __OFFLINE_MODE__)
+    → web/dist/
+
+web/dist
+    → cargo make compress-webapp → target/webapp/webapp.tar.xz (GNU tar, fixed mtime)
+    → cargo make sign-webapp{,-test} → webapp.metadata + webapp.parameters
+    → cargo make update-published-contract{,-prod} → published-contract/{wasm,parameters,contract-id.txt}
+    → cargo make publish-webapp{,-test} → fdev publish (against committed snapshot)
 ```
 
-The `__MODEL_CONTRACT__` global constant in the web app is populated at build
-time from `model_code_hash.txt` via Vite's `define` config, linking the UI to
-the specific posts contract instance.
+The `published-contract/` directory is committed. CI verifies it matches HEAD.
+Production releases bump the snapshot via `scripts/release.sh`.
+
+### Releasing
+
+See `RELEASING.md` for the production release runbook. TL;DR:
+
+```bash
+scripts/release.sh 0.1.0
+```
+
+Three confirmation gates. Idempotent up to the commit step. The committed
+`published-contract/` snapshot is what CI and downstream consumers verify
+against, not freshly built artifacts.
 
 ### Testing
 
 ```bash
-make test                                      # All tests
+cargo make test                                # All tests
 cargo test -p freenet-microblogging-posts       # Posts contract (5 tests)
 cargo test -p freenet-microblogging-follows     # Follows contract (4 tests)
 cd web && npm test                              # Web app (Vitest)
@@ -171,7 +199,7 @@ cd web && npm test                              # Web app (Vitest)
 
 ### Environment Requirements
 
-- `CARGO_TARGET_DIR` must be set (required by Makefile)
+- `CARGO_TARGET_DIR` must be set (required by Makefile.toml)
 - Node.js and npm for web app
 - Rust toolchain with `wasm32-unknown-unknown` target
 - `freenet` and `fdev` CLI tools (`cargo install freenet fdev`)

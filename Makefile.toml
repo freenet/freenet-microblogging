@@ -1,0 +1,531 @@
+[config]
+skip_core_tasks = true
+default_to_workspace = false
+
+[env]
+CONTRACT_TARGET = "wasm32-unknown-unknown"
+BUILD_PROFILE = "release"
+
+[tasks.clean]
+description = "Clean build artifacts + generated files"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+cargo clean
+rm -rf "$ROOT/web/dist" "$ROOT/web/build" "$ROOT/build" "$ROOT/target/webapp"
+rm -f "$ROOT/web/model_code_hash.txt" "$ROOT/web/delegate_key.txt" \
+      "$ROOT/web/delegate_key_bytes.json" "$ROOT/web/delegate_code_hash_bytes.json"
+'''
+
+[tasks.default]
+alias = "build"
+
+[tasks.build-posts]
+description = "Build posts contract WASM + write code_hash"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+cd "$ROOT/contracts/posts"
+CARGO_TARGET_DIR="$ROOT/target" fdev build
+hash=$(CARGO_TARGET_DIR="$ROOT/target" fdev inspect \
+    "$ROOT/contracts/posts/build/freenet/freenet_microblogging_posts" code | \
+    grep 'code hash:' | cut -d' ' -f3)
+mkdir -p "$ROOT/build"
+printf '%s' "$hash" > "$ROOT/build/posts_code_hash"
+# Legacy: vite.config.ts reads web/model_code_hash.txt for __MODEL_CONTRACT__.
+# Mirror until UI switches to include_str! pattern.
+printf '%s' "$hash" > "$ROOT/web/model_code_hash.txt"
+echo "wrote build/posts_code_hash + web/model_code_hash.txt: $hash"
+'''
+
+[tasks.build-follows]
+description = "Build follows contract WASM + code_hash"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+cd "$ROOT/contracts/follows"
+CARGO_TARGET_DIR="$ROOT/target" fdev build
+hash=$(CARGO_TARGET_DIR="$ROOT/target" fdev inspect \
+    "$ROOT/contracts/follows/build/freenet/freenet_microblogging_follows" code | \
+    grep 'code hash:' | cut -d' ' -f3)
+mkdir -p "$ROOT/build"
+printf '%s' "$hash" > "$ROOT/build/follows_code_hash"
+echo "wrote build/follows_code_hash: $hash"
+'''
+
+[tasks.build-likes]
+description = "Build likes contract WASM + code_hash"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+cd "$ROOT/contracts/likes"
+CARGO_TARGET_DIR="$ROOT/target" fdev build
+hash=$(CARGO_TARGET_DIR="$ROOT/target" fdev inspect \
+    "$ROOT/contracts/likes/build/freenet/freenet_microblogging_likes" code | \
+    grep 'code hash:' | cut -d' ' -f3)
+mkdir -p "$ROOT/build"
+printf '%s' "$hash" > "$ROOT/build/likes_code_hash"
+echo "wrote build/likes_code_hash: $hash"
+'''
+
+[tasks.build-identity]
+description = "Build identity delegate WASM + code_hash + delegate_key bytes"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+cd "$ROOT/delegates/identity"
+CARGO_TARGET_DIR="$ROOT/target" fdev build --package-type delegate
+hash=$(CARGO_TARGET_DIR="$ROOT/target" fdev inspect \
+    "$ROOT/delegates/identity/build/freenet/freenet_microblogging_identity" delegate | \
+    grep 'code hash:' | cut -d' ' -f3)
+mkdir -p "$ROOT/build"
+printf '%s' "$hash" > "$ROOT/build/identity_code_hash"
+# Preserve legacy delegate-key derivation that the UI consumes.
+WASM="$ROOT/target/wasm32-unknown-unknown/release/freenet_microblogging_identity.wasm"
+code_hash_hex=$(b3sum --no-names "$WASM" | tr -d '[:space:]')
+key_hex=$(echo -n "$code_hash_hex" | xxd -r -p | b3sum --no-names | tr -d '[:space:]')
+node -e "console.log(JSON.stringify(Array.from(Buffer.from(process.argv[1],'hex'))))" \
+    "$key_hex" > "$ROOT/web/delegate_key_bytes.json"
+node -e "console.log(JSON.stringify(Array.from(Buffer.from(process.argv[1],'hex'))))" \
+    "$code_hash_hex" > "$ROOT/web/delegate_code_hash_bytes.json"
+printf '%s' "$key_hex" > "$ROOT/web/delegate_key.txt"
+echo "identity hash=$hash key=$key_hex"
+'''
+
+[tasks.build-contracts]
+description = "Build all contracts + delegates (WASM + code_hash files)"
+dependencies = ["build-posts", "build-follows", "build-likes", "build-identity"]
+
+[tasks.build-web-container]
+description = "Build web/container Rust crate (WASM)"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+cargo build --profile "${BUILD_PROFILE}" --target "${CONTRACT_TARGET}" \
+    -p freenet-microblogging-web --features freenet-main-contract
+# Cargo places cdylib output in deps/ for this crate config. Mirror to release/
+# root so downstream tasks (sign-webapp, update-published-contract) find it at
+# the conventional path mail uses.
+SRC="$ROOT/target/${CONTRACT_TARGET}/release/deps/freenet_microblogging_web.wasm"
+DST="$ROOT/target/${CONTRACT_TARGET}/release/freenet_microblogging_web.wasm"
+[ -f "$SRC" ] || { echo "error: expected $SRC after build" >&2; exit 1; }
+cp "$SRC" "$DST"
+echo "wrote $DST ($(wc -c < "$DST") bytes)"
+'''
+
+[tasks.build-ui]
+description = "Build the Vite/TypeScript web UI"
+dependencies = ["build-contracts"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+cd "${CARGO_MAKE_WORKING_DIRECTORY}/web"
+npm install
+npm run build
+'''
+
+[tasks.build]
+description = "Full build: contracts + UI + web container"
+dependencies = ["build-ui", "build-web-container"]
+
+[tasks.test]
+description = "Run all tests (Rust workspace + Vitest)"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+cargo test -p freenet-microblogging-posts
+cargo test -p freenet-microblogging-follows
+cargo test -p freenet-microblogging-likes
+cd "$ROOT/web" && npm test
+'''
+
+[tasks.clippy]
+description = "Run clippy on all packages, deny warnings"
+command = "cargo"
+args = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+
+[tasks.check]
+description = "Type check: cargo check + tsc --noEmit"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+cargo check --workspace
+cd "$ROOT/web" && npx tsc --noEmit
+'''
+
+[tasks.fmt-check]
+description = "cargo fmt --check"
+command = "cargo"
+args = ["fmt", "--all", "--", "--check"]
+
+[tasks.run-node]
+description = "Run local Freenet node"
+script_runner = "bash"
+script = '''
+RUST_BACKTRACE=1 RUST_LOG=freenet=debug,freenet_core=debug,info \
+    freenet local --ws-api-address 127.0.0.1
+'''
+
+[tasks.build-ui-offline]
+description = "Vite build in offline mode (mock data, no node) — for CI/Playwright"
+dependencies = ["build-contracts"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+cd "${CARGO_MAKE_WORKING_DIRECTORY}/web"
+npm install
+npm run build:offline
+'''
+
+[tasks.dev-offline]
+description = "Vite dev server in offline mode"
+script_runner = "bash"
+script = '''
+cd "${CARGO_MAKE_WORKING_DIRECTORY}/web" && npm run dev:offline
+'''
+
+[tasks.test-posts]
+description = "Run posts contract tests"
+command = "cargo"
+args = ["test", "-p", "freenet-microblogging-posts"]
+
+[tasks.test-follows]
+description = "Run follows contract tests"
+command = "cargo"
+args = ["test", "-p", "freenet-microblogging-follows"]
+
+[tasks.test-likes]
+description = "Run likes contract tests"
+command = "cargo"
+args = ["test", "-p", "freenet-microblogging-likes"]
+
+[tasks.test-identity]
+description = "Run identity delegate tests"
+command = "cargo"
+args = ["test", "-p", "freenet-microblogging-identity"]
+
+[tasks.test-web]
+description = "Run Vitest suite"
+script_runner = "bash"
+script = '''
+cd "${CARGO_MAKE_WORKING_DIRECTORY}/web" && npm test
+'''
+
+[tasks.generate-web-container-keys]
+description = "Generate fresh ed25519 keypair for the web-container test signer"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+KEY_FILE="${CARGO_MAKE_WORKING_DIRECTORY}/test-contract/web-container-keys.toml"
+if [ -f "$KEY_FILE" ]; then
+    echo "$KEY_FILE already exists; remove it first to rotate the test key" >&2
+    exit 1
+fi
+mkdir -p "$(dirname "$KEY_FILE")"
+cargo run --quiet -p web-container-sign -- generate --output "$KEY_FILE"
+echo "wrote $KEY_FILE — commit it"
+'''
+
+[tasks.compress-webapp]
+description = "Compress built UI into target/webapp/webapp.tar.xz (reproducible)"
+dependencies = ["build-ui"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+DIST="$ROOT/web/dist"
+if [ ! -d "$DIST" ]; then
+    echo "error: $DIST not found (did build-ui run?)" >&2
+    exit 1
+fi
+mkdir -p "$ROOT/target/webapp"
+# Reproducibility: --sort=name + fixed --mtime + --owner/--group=0 + --numeric-owner
+# require GNU tar. macOS: `brew install gnu-tar` for `gtar`.
+if command -v gtar >/dev/null 2>&1; then
+    TAR=gtar
+elif tar --version 2>/dev/null | grep -qi 'gnu tar'; then
+    TAR=tar
+else
+    echo "warning: GNU tar not found — archive will NOT be byte-identical across machines." >&2
+    echo "         Install gnu-tar for reproducible builds (macOS: brew install gnu-tar)." >&2
+    TAR=""
+fi
+if [ -n "$TAR" ]; then
+    "$TAR" --sort=name \
+        --mtime='2024-01-01 00:00:00 UTC' \
+        --owner=0 --group=0 --numeric-owner \
+        -C "$DIST" \
+        -cJf "$ROOT/target/webapp/webapp.tar.xz" .
+else
+    tar -C "$DIST" -cJf "$ROOT/target/webapp/webapp.tar.xz" .
+fi
+echo "wrote $ROOT/target/webapp/webapp.tar.xz ($(wc -c < "$ROOT/target/webapp/webapp.tar.xz") bytes)"
+'''
+
+[tasks.sign-webapp-test]
+description = "Sign the compressed webapp with the committed test key"
+dependencies = ["compress-webapp"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+KEY_FILE="$ROOT/test-contract/web-container-keys.toml"
+if [ ! -f "$KEY_FILE" ]; then
+    echo "error: $KEY_FILE not found — run \`cargo make generate-web-container-keys\` first" >&2
+    exit 1
+fi
+short=$(git -C "$ROOT" rev-parse --short=8 HEAD)
+version=$(( $(printf '%d' "0x$short") & 0x7fffffff ))
+if [ "$version" -eq 0 ]; then version=1; fi
+echo "signing with version $version (from commit $short)"
+cargo run --quiet -p web-container-sign -- sign \
+    --input "$ROOT/target/webapp/webapp.tar.xz" \
+    --output "$ROOT/target/webapp/webapp.metadata" \
+    --parameters "$ROOT/target/webapp/webapp.parameters" \
+    --version "$version" \
+    --key-file "$KEY_FILE"
+'''
+
+[tasks.sign-webapp]
+description = "Sign the compressed webapp with the PRODUCTION key"
+dependencies = ["compress-webapp"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+KEY_FILE="${WEB_CONTAINER_KEY_FILE:-$HOME/.config/freenet-microblogging/web-container-keys.toml}"
+if [ ! -f "$KEY_FILE" ]; then
+    echo "error: production key file not found at $KEY_FILE" >&2
+    echo >&2
+    echo "generate one out of band with:" >&2
+    echo "  scripts/generate-production-key.sh" >&2
+    echo >&2
+    echo "or override with:" >&2
+    echo "  WEB_CONTAINER_KEY_FILE=/path/to/keys.toml cargo make sign-webapp" >&2
+    exit 1
+fi
+short=$(git -C "$ROOT" rev-parse --short=8 HEAD)
+version=$(( $(printf '%d' "0x$short") & 0x7fffffff ))
+if [ "$version" -eq 0 ]; then version=1; fi
+echo "signing with PRODUCTION key at $KEY_FILE, version $version (from commit $short)"
+cargo run --quiet -p web-container-sign -- sign \
+    --input "$ROOT/target/webapp/webapp.tar.xz" \
+    --output "$ROOT/target/webapp/webapp.metadata" \
+    --parameters "$ROOT/target/webapp/webapp.parameters" \
+    --version "$version" \
+    --key-file "$KEY_FILE"
+'''
+
+[tasks.update-published-contract]
+description = "Copy signed TEST artifacts into published-contract/ and record contract ID"
+dependencies = ["sign-webapp-test", "build-web-container"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+WASM="$ROOT/target/wasm32-unknown-unknown/release/freenet_microblogging_web.wasm"
+PARAMS="$ROOT/target/webapp/webapp.parameters"
+[ -f "$WASM" ]   || { echo "error: $WASM not found"   >&2; exit 1; }
+[ -f "$PARAMS" ] || { echo "error: $PARAMS not found" >&2; exit 1; }
+contract_id=$(CARGO_TARGET_DIR="$ROOT/target" fdev get-contract-id \
+    --code "$WASM" --parameters "$PARAMS")
+[ -n "$contract_id" ] || { echo "error: empty contract id from fdev" >&2; exit 1; }
+mkdir -p "$ROOT/published-contract"
+cp "$WASM"   "$ROOT/published-contract/web_container_contract.wasm"
+cp "$PARAMS" "$ROOT/published-contract/webapp.parameters"
+printf '%s\n' "$contract_id" > "$ROOT/published-contract/contract-id.txt"
+echo "published-contract/ updated:"
+echo "  contract-id.txt              = $contract_id"
+echo "  web_container_contract.wasm  = $(wc -c < "$ROOT/published-contract/web_container_contract.wasm") bytes"
+echo "  webapp.parameters            = $(wc -c < "$ROOT/published-contract/webapp.parameters") bytes"
+'''
+
+[tasks.update-published-contract-prod]
+description = "Copy signed PRODUCTION artifacts into published-contract/ and record contract ID"
+dependencies = ["sign-webapp", "build-web-container"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+WASM="$ROOT/target/wasm32-unknown-unknown/release/freenet_microblogging_web.wasm"
+PARAMS="$ROOT/target/webapp/webapp.parameters"
+[ -f "$WASM" ]   || { echo "error: $WASM not found"   >&2; exit 1; }
+[ -f "$PARAMS" ] || { echo "error: $PARAMS not found" >&2; exit 1; }
+contract_id=$(CARGO_TARGET_DIR="$ROOT/target" fdev get-contract-id \
+    --code "$WASM" --parameters "$PARAMS")
+[ -n "$contract_id" ] || { echo "error: empty contract id from fdev" >&2; exit 1; }
+mkdir -p "$ROOT/published-contract"
+cp "$WASM"   "$ROOT/published-contract/web_container_contract.wasm"
+cp "$PARAMS" "$ROOT/published-contract/webapp.parameters"
+printf '%s\n' "$contract_id" > "$ROOT/published-contract/contract-id.txt"
+echo "published-contract/ updated (PRODUCTION):"
+echo "  contract-id.txt              = $contract_id"
+'''
+
+[tasks.publish-posts]
+description = "Publish posts contract to local node"
+dependencies = ["build-posts"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+fdev publish \
+    --code "$ROOT/target/wasm32-unknown-unknown/release/freenet_microblogging_posts.wasm" \
+    contract \
+    --state "$ROOT/contracts/posts/initial_state.json"
+'''
+
+[tasks.publish-follows]
+description = "Publish follows contract to local node"
+dependencies = ["build-follows"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+fdev publish \
+    --code "$ROOT/target/wasm32-unknown-unknown/release/freenet_microblogging_follows.wasm" \
+    contract \
+    --state "$ROOT/contracts/follows/initial_state.json"
+'''
+
+[tasks.publish-likes]
+description = "Publish likes contract to local node"
+dependencies = ["build-likes"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+fdev publish \
+    --code "$ROOT/target/wasm32-unknown-unknown/release/freenet_microblogging_likes.wasm" \
+    contract \
+    --state "$ROOT/contracts/likes/initial_state.json"
+'''
+
+[tasks.publish-identity]
+description = "Publish identity delegate to local node"
+dependencies = ["build-identity"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+fdev publish \
+    --code "$ROOT/delegates/identity/build/freenet/freenet_microblogging_identity" \
+    delegate
+'''
+
+[tasks.publish-webapp-test]
+description = "Publish the test-signed webapp from published-contract/ to a local node"
+dependencies = ["sign-webapp-test", "build-web-container"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+[ -f "$ROOT/published-contract/contract-id.txt" ] || {
+    echo "error: published-contract/contract-id.txt missing — run \`cargo make update-published-contract\` first" >&2
+    exit 1
+}
+echo "publishing test webapp (contract id: $(cat "$ROOT/published-contract/contract-id.txt"))"
+fdev publish \
+    --code "$ROOT/published-contract/web_container_contract.wasm" \
+    --parameters "$ROOT/published-contract/webapp.parameters" \
+    contract \
+    --webapp-archive "$ROOT/target/webapp/webapp.tar.xz" \
+    --webapp-metadata "$ROOT/target/webapp/webapp.metadata"
+'''
+
+[tasks.publish-webapp]
+description = "Publish the PRODUCTION-signed webapp from published-contract/ to Freenet"
+dependencies = ["sign-webapp", "build-web-container"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+[ -f "$ROOT/published-contract/contract-id.txt" ] || {
+    echo "error: published-contract/contract-id.txt missing" >&2
+    exit 1
+}
+echo "publishing PRODUCTION webapp (contract id: $(cat "$ROOT/published-contract/contract-id.txt"))"
+fdev publish \
+    --code "$ROOT/published-contract/web_container_contract.wasm" \
+    --parameters "$ROOT/published-contract/webapp.parameters" \
+    contract \
+    --webapp-archive "$ROOT/target/webapp/webapp.tar.xz" \
+    --webapp-metadata "$ROOT/target/webapp/webapp.metadata"
+'''
+
+[tasks.publish-all]
+description = "End-to-end test publish: build → sign → snapshot → publish-webapp-test"
+dependencies = [
+    "build",
+    "update-published-contract",
+    "publish-posts",
+    "publish-follows",
+    "publish-likes",
+    "publish-identity",
+    "publish-webapp-test",
+]
+
+[tasks.publish-production]
+description = "End-to-end PRODUCTION publish (use scripts/release.sh, not directly)"
+dependencies = [
+    "build",
+    "update-published-contract-prod",
+    "publish-webapp",
+]
+
+[tasks.test-ui-playwright-setup]
+description = "Install Playwright browsers (one-time setup)"
+script_runner = "bash"
+script = '''
+cd "${CARGO_MAKE_WORKING_DIRECTORY}/web/tests" && \
+    npm install && \
+    npx playwright install chromium firefox webkit
+'''
+
+[tasks.test-ui-playwright]
+description = "Build offline UI, start preview server, run Playwright, tear down"
+dependencies = ["build-ui-offline"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+PORT=8082
+
+cd "$ROOT/web" && npx vite preview --port "$PORT" --strictPort &
+VITE_PID=$!
+trap "kill $VITE_PID 2>/dev/null || true" EXIT
+
+echo "Waiting for preview server on :$PORT..."
+ready=false
+for _ in $(seq 1 60); do
+    if curl -fsS "http://localhost:$PORT/" >/dev/null 2>&1; then
+        ready=true
+        break
+    fi
+    sleep 2
+done
+if [ "$ready" != "true" ]; then
+    echo "ERROR: preview server failed to start within 120s" >&2
+    exit 1
+fi
+
+cd "$ROOT/web/tests" && BASE_URL="http://localhost:$PORT" npx playwright test
+'''
+
+[tasks.clean-node]
+description = "Wipe local Freenet node state (macOS paths)"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+rm -rf "$HOME/Library/Application Support/The-Freenet-Project-Inc.Freenet"
+rm -rf "$HOME/Library/Caches/The-Freenet-Project-Inc.freenet"
+echo "wiped local Freenet node state"
+'''

@@ -33,6 +33,7 @@ export default defineConfig({
     __DELEGATE_KEY__: JSON.stringify(readFileOrDefault("delegate_key.txt", "")),
     __DELEGATE_KEY_BYTES__: readFileOrDefault("delegate_key_bytes.json", "[]"),
     __DELEGATE_CODE_HASH_BYTES__: readFileOrDefault("delegate_code_hash_bytes.json", "[]"),
+    __OFFLINE_MODE__: JSON.stringify(process.env.VITE_OFFLINE_MODE === "1"),
   },
   css: {
     preprocessorOptions: {

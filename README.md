@@ -62,17 +62,17 @@ signing.
 3. Build and publish:
 
    ```bash
-   # Set target directory (required by Makefile)
+   # Set target directory (required by Makefile.toml)
    export CARGO_TARGET_DIR=$(pwd)/target
 
    # Full build: contracts + delegate + web app + publish all
-   make build
+   cargo make build
    ```
 
 4. Run the node:
 
    ```bash
-   make run-node
+   cargo make run-node
    ```
 
 5. Open the web app URL printed during publish
@@ -82,24 +82,24 @@ signing.
 
 ```bash
 # Rebuild just the web app
-make webapp publish-webapp
+cargo make build-ui publish-webapp-test
 
 # Rebuild a single contract
-make posts publish-posts
-make follows publish-follows
-make likes publish-likes
+cargo make publish-posts
+cargo make publish-follows
+cargo make publish-likes
 
 # Rebuild identity delegate
-make identity publish-identity
+cargo make publish-identity
 
 # Run all tests (Rust + web)
-make test
+cargo make test
 
 # Type check everything
-make check
+cargo make check
 
 # Reset node data (required when republishing contracts)
-make clean-node
+cargo make clean-node
 
 # Vite dev server (without Freenet)
 cd web && npm run dev

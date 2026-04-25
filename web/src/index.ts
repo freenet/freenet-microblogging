@@ -14,6 +14,7 @@ import {
 } from "./identity";
 import { parseDelegateResponse } from "./delegate-api";
 import { DelegateResponse } from "@freenetorg/freenet-stdlib";
+import { MOCK_POSTS } from "./mock-data";
 
 document.title = APP_NAME;
 
@@ -209,5 +210,21 @@ function showOnboarding(): void {
 // ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
-showSplash();
-connection.connect();
+if (__OFFLINE_MODE__) {
+  // Offline mode: skip WebSocket / delegate, render immediately with mock data.
+  // Used for CI / Playwright / no-node previews.
+  console.log("[offline] Booting in offline mode with mock data");
+  const identity = createIdentity("Offline Demo");
+  renderApp(identity);
+  // renderApp triggers connection.loadState() which is a no-op without a connect().
+  // Push mock posts into the feed once the app is mounted.
+  setTimeout(() => {
+    const feed = appElement?.querySelector(".feed-column") as
+      | (HTMLElement & { updatePosts: (posts: Post[]) => void })
+      | null;
+    feed?.updatePosts(MOCK_POSTS);
+  }, 0);
+} else {
+  showSplash();
+  connection.connect();
+}

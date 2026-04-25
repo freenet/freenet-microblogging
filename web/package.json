@@ -3,7 +3,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:offline": "VITE_OFFLINE_MODE=1 vite",
     "build": "tsc && vite build",
+    "build:offline": "VITE_OFFLINE_MODE=1 tsc && VITE_OFFLINE_MODE=1 vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"
