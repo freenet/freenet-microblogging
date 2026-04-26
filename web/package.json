@@ -11,7 +11,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@freenetorg/freenet-stdlib": "file:../../freenet-stdlib/typescript"
+    "@freenetorg/freenet-stdlib": "^0.2.0"
   },
   "devDependencies": {
     "sass": "^1.87.0",

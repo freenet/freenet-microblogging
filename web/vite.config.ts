@@ -8,26 +8,6 @@ function readFileOrDefault(filename: string, fallback: string): string {
 }
 
 export default defineConfig({
-  resolve: {
-    alias: {
-      "@freenetorg/freenet-stdlib/client-request": resolve(
-        __dirname,
-        "../../freenet-stdlib/typescript/src/client-request.ts"
-      ),
-      "@freenetorg/freenet-stdlib/common": resolve(
-        __dirname,
-        "../../freenet-stdlib/typescript/src/common.ts"
-      ),
-      "@freenetorg/freenet-stdlib/host-response": resolve(
-        __dirname,
-        "../../freenet-stdlib/typescript/src/host-response.ts"
-      ),
-      "@freenetorg/freenet-stdlib": resolve(
-        __dirname,
-        "../../freenet-stdlib/typescript/src/index.ts"
-      ),
-    },
-  },
   define: {
     __MODEL_CONTRACT__: JSON.stringify(readFileOrDefault("model_code_hash.txt", "DEV_MODE_NO_CONTRACT_HASH")),
     __DELEGATE_KEY__: JSON.stringify(readFileOrDefault("delegate_key.txt", "")),
