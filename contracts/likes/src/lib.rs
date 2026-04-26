@@ -64,9 +64,8 @@ impl ContractInterface for LikeGraph {
             UpdateData::StateAndDelta { delta, .. } => delta.as_ref(),
             _ => {
                 return Ok(UpdateModification::valid(State::from(
-                    serde_json::to_vec(&graph)
-                        .map_err(|e| ContractError::Other(format!("{e}")))?,
-                )))
+                    serde_json::to_vec(&graph).map_err(|e| ContractError::Other(format!("{e}")))?,
+                )));
             }
         };
         let actions = serde_json::from_slice::<Vec<LikeAction>>(delta_bytes)
@@ -84,8 +83,8 @@ impl ContractInterface for LikeGraph {
             }
         }
 
-        let bytes = serde_json::to_vec(&graph)
-            .map_err(|err| ContractError::Other(format!("{err}")))?;
+        let bytes =
+            serde_json::to_vec(&graph).map_err(|err| ContractError::Other(format!("{err}")))?;
         Ok(UpdateModification::valid(State::from(bytes)))
     }
 
@@ -101,8 +100,7 @@ impl ContractInterface for LikeGraph {
             .map(|(k, v)| (k.as_str(), v.len()))
             .collect();
         Ok(StateSummary::from(
-            serde_json::to_vec(&summary)
-                .map_err(|err| ContractError::Other(format!("{err}")))?,
+            serde_json::to_vec(&summary).map_err(|err| ContractError::Other(format!("{err}")))?,
         ))
     }
 
@@ -136,8 +134,7 @@ mod test {
     #[test]
     fn like_action() {
         let state = r#"{"likes":{}}"#.as_bytes().to_vec();
-        let delta =
-            r#"[{"post_id":"post_123","user_pubkey":"alice_pk","action":"Like"}]"#;
+        let delta = r#"[{"post_id":"post_123","user_pubkey":"alice_pk","action":"Like"}]"#;
 
         let result = LikeGraph::update_state(
             [].as_ref().into(),
@@ -148,17 +145,14 @@ mod test {
         )
         .unwrap();
 
-        let new_state: LikeGraph =
-            serde_json::from_slice(result.unwrap_valid().as_ref()).unwrap();
+        let new_state: LikeGraph = serde_json::from_slice(result.unwrap_valid().as_ref()).unwrap();
         assert!(new_state.likes["post_123"].contains("alice_pk"));
     }
 
     #[test]
     fn unlike_action() {
-        let state =
-            r#"{"likes":{"post_123":["alice_pk"]}}"#.as_bytes().to_vec();
-        let delta =
-            r#"[{"post_id":"post_123","user_pubkey":"alice_pk","action":"Unlike"}]"#;
+        let state = r#"{"likes":{"post_123":["alice_pk"]}}"#.as_bytes().to_vec();
+        let delta = r#"[{"post_id":"post_123","user_pubkey":"alice_pk","action":"Unlike"}]"#;
 
         let result = LikeGraph::update_state(
             [].as_ref().into(),
@@ -169,13 +163,12 @@ mod test {
         )
         .unwrap();
 
-        let new_state: LikeGraph =
-            serde_json::from_slice(result.unwrap_valid().as_ref()).unwrap();
+        let new_state: LikeGraph = serde_json::from_slice(result.unwrap_valid().as_ref()).unwrap();
         assert!(
             !new_state
                 .likes
                 .get("post_123")
-                .map_or(false, |s| s.contains("alice_pk"))
+                .is_some_and(|s| s.contains("alice_pk"))
         );
     }
 
@@ -185,8 +178,7 @@ mod test {
         let state = r#"{"likes":{}}"#.as_bytes().to_vec();
 
         // Order 1: alice likes post, then bob likes post
-        let delta_alice =
-            r#"[{"post_id":"post_123","user_pubkey":"alice_pk","action":"Like"}]"#;
+        let delta_alice = r#"[{"post_id":"post_123","user_pubkey":"alice_pk","action":"Like"}]"#;
         let result1 = LikeGraph::update_state(
             [].as_ref().into(),
             State::from(state.clone()),
@@ -196,8 +188,7 @@ mod test {
         )
         .unwrap();
 
-        let delta_bob =
-            r#"[{"post_id":"post_123","user_pubkey":"bob_pk","action":"Like"}]"#;
+        let delta_bob = r#"[{"post_id":"post_123","user_pubkey":"bob_pk","action":"Like"}]"#;
         let result1_2 = LikeGraph::update_state(
             [].as_ref().into(),
             result1.unwrap_valid(),
@@ -226,10 +217,8 @@ mod test {
         )
         .unwrap();
 
-        let g1: LikeGraph =
-            serde_json::from_slice(result1_2.unwrap_valid().as_ref()).unwrap();
-        let g2: LikeGraph =
-            serde_json::from_slice(result2_1.unwrap_valid().as_ref()).unwrap();
+        let g1: LikeGraph = serde_json::from_slice(result1_2.unwrap_valid().as_ref()).unwrap();
+        let g2: LikeGraph = serde_json::from_slice(result2_1.unwrap_valid().as_ref()).unwrap();
 
         assert_eq!(g1.likes["post_123"], g2.likes["post_123"]);
     }

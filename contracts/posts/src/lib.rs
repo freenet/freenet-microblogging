@@ -1,5 +1,5 @@
 use freenet_stdlib::prelude::{
-    blake3::{traits::digest::Digest, Hasher as Blake3},
+    blake3::{Hasher as Blake3, traits::digest::Digest},
     *,
 };
 use serde::{Deserialize, Serialize};
@@ -19,13 +19,13 @@ impl<'a> TryFrom<State<'a>> for PostsFeed {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Post {
-    pub id: String,              // unique ID: "{author_pubkey}-{timestamp_ms}"
-    pub author_pubkey: String,   // hex-encoded public key
-    pub author_name: String,     // display name
-    pub author_handle: String,   // @handle
-    pub content: String,         // post text (max 280 chars)
-    pub timestamp: u64,          // unix timestamp milliseconds
-    pub signature: Option<Box<[u8]>>,  // signature over content bytes
+    pub id: String,                   // unique ID: "{author_pubkey}-{timestamp_ms}"
+    pub author_pubkey: String,        // hex-encoded public key
+    pub author_name: String,          // display name
+    pub author_handle: String,        // @handle
+    pub content: String,              // post text (max 280 chars)
+    pub timestamp: u64,               // unix timestamp milliseconds
+    pub signature: Option<Box<[u8]>>, // signature over content bytes
 }
 
 impl Post {
@@ -98,9 +98,11 @@ impl ContractInterface for PostsFeed {
             UpdateData::Delta(d) => d.as_ref(),
             UpdateData::State(s) => s.as_ref(),
             UpdateData::StateAndDelta { delta, .. } => delta.as_ref(),
-            _ => return Ok(UpdateModification::valid(State::from(
-                serde_json::to_vec(&feed).map_err(|e| ContractError::Other(format!("{e}")))?
-            ))),
+            _ => {
+                return Ok(UpdateModification::valid(State::from(
+                    serde_json::to_vec(&feed).map_err(|e| ContractError::Other(format!("{e}")))?,
+                )));
+            }
         };
         let mut incoming = serde_json::from_slice::<Vec<Post>>(delta_bytes)
             .map_err(|_| ContractError::InvalidDelta)?;
@@ -119,8 +121,8 @@ impl ContractInterface for PostsFeed {
             }
         }
 
-        let feed_bytes = serde_json::to_vec(&feed)
-            .map_err(|err| ContractError::Other(format!("{err}")))?;
+        let feed_bytes =
+            serde_json::to_vec(&feed).map_err(|err| ContractError::Other(format!("{err}")))?;
         Ok(UpdateModification::valid(State::from(feed_bytes)))
     }
 
@@ -220,7 +222,9 @@ mod test {
         // Content too long (> 280 chars)
         let long_content = "x".repeat(281);
         let post_long = make_post("pubkey2-1700000000001", "pubkey2", &long_content);
-        let feed_long = PostsFeed { posts: vec![post_long] };
+        let feed_long = PostsFeed {
+            posts: vec![post_long],
+        };
         let state_long = serde_json::to_vec(&feed_long)?;
 
         let invalid = PostsFeed::validate_state(
@@ -233,7 +237,9 @@ mod test {
         // Empty id
         let mut post_empty_id = make_post("", "pubkey3", "content");
         post_empty_id.id = "".to_string();
-        let feed_empty = PostsFeed { posts: vec![post_empty_id] };
+        let feed_empty = PostsFeed {
+            posts: vec![post_empty_id],
+        };
         let state_empty = serde_json::to_vec(&feed_empty)?;
 
         let invalid2 = PostsFeed::validate_state(
@@ -249,7 +255,9 @@ mod test {
     #[test]
     fn update_state() -> Result<(), Box<dyn std::error::Error>> {
         let post1 = make_post("pubkey1-1700000000000", "pubkey1", "First post");
-        let feed = PostsFeed { posts: vec![post1.clone()] };
+        let feed = PostsFeed {
+            posts: vec![post1.clone()],
+        };
         let state_bytes = serde_json::to_vec(&feed)?;
 
         let post2 = make_post("pubkey2-1700000000001", "pubkey2", "Second post");
@@ -308,7 +316,9 @@ mod test {
     fn get_state_delta() -> Result<(), Box<dyn std::error::Error>> {
         let post1 = make_post("pubkey1-1700000000000", "pubkey1", "First post");
         let post2 = make_post("pubkey2-1700000000001", "pubkey2", "Second post");
-        let feed = PostsFeed { posts: vec![post1.clone(), post2.clone()] };
+        let feed = PostsFeed {
+            posts: vec![post1.clone(), post2.clone()],
+        };
         let state_bytes = serde_json::to_vec(&feed)?;
 
         // Summary only contains post1 — delta should return post2

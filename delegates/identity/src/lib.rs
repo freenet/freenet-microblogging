@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 use ed25519_dalek::{Signer, SigningKey};
 use freenet_stdlib::prelude::*;
 use rand_core::RngCore;
@@ -25,7 +26,7 @@ enum Request {
     ExportIdentity,
     /// Import a private key + identity from another device.
     ImportIdentity {
-        secret_key: String,    // hex-encoded 32-byte Ed25519 secret key
+        secret_key: String, // hex-encoded 32-byte Ed25519 secret key
         display_name: String,
     },
 }
@@ -35,18 +36,18 @@ enum Request {
 #[serde(tag = "type")]
 enum Response {
     Identity {
-        public_key: String,   // hex-encoded
+        public_key: String, // hex-encoded
         handle: String,
         display_name: String,
     },
     Signed {
         post_id: String,
-        signature: String,    // hex-encoded
-        public_key: String,   // hex-encoded
+        signature: String,  // hex-encoded
+        public_key: String, // hex-encoded
     },
     ExportedIdentity {
-        secret_key: String,   // hex-encoded 32-byte secret key
-        public_key: String,   // hex-encoded
+        secret_key: String, // hex-encoded 32-byte secret key
+        public_key: String, // hex-encoded
         display_name: String,
         handle: String,
     },
@@ -103,11 +104,7 @@ impl DelegateInterface for IdentityDelegate {
         // Verify origin — only accept calls from web apps.
         match &origin {
             Some(MessageOrigin::WebApp(_)) => {}
-            _ => {
-                return Err(DelegateError::Other(
-                    "only web app calls accepted".into(),
-                ))
-            }
+            _ => return Err(DelegateError::Other("only web app calls accepted".into())),
         }
 
         match message {
@@ -168,7 +165,7 @@ fn get_identity(ctx: &DelegateCtx) -> Response {
                 Err(_) => {
                     return Response::Error {
                         message: "stored signing key has unexpected length".to_string(),
-                    }
+                    };
                 }
             };
             let signing_key = SigningKey::from_bytes(&key_arr);
@@ -203,7 +200,7 @@ fn sign_post(ctx: &DelegateCtx, post_content: &str, post_id: &str) -> Response {
                 Err(_) => {
                     return Response::Error {
                         message: "stored signing key has unexpected length".to_string(),
-                    }
+                    };
                 }
             };
             let signing_key = SigningKey::from_bytes(&key_arr);
@@ -230,7 +227,7 @@ fn export_identity(ctx: &DelegateCtx) -> Response {
                 Err(_) => {
                     return Response::Error {
                         message: "stored signing key has unexpected length".to_string(),
-                    }
+                    };
                 }
             };
             let signing_key = SigningKey::from_bytes(&key_arr);
@@ -263,7 +260,7 @@ fn import_identity(ctx: &mut DelegateCtx, secret_key_hex: &str, display_name: &s
         _ => {
             return Response::Error {
                 message: "invalid secret key: must be 64 hex characters (32 bytes)".to_string(),
-            }
+            };
         }
     };
 

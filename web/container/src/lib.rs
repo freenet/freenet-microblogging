@@ -1,5 +1,6 @@
 use freenet_stdlib::prelude::*;
 
+#[allow(dead_code)]
 struct Contract;
 
 // TODO: verify that the state is signed by a pub/key pair

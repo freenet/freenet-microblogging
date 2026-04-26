@@ -8,7 +8,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_MAKE_VERSION: "0.37.18"
-  FDEV_VERSION: "0.6.0"
+  FDEV_VERSION: "0.3.212"
 
 jobs:
   build-and-test:
@@ -25,24 +25,24 @@ jobs:
           if ! tar --version | grep -qi 'gnu tar'; then
             sudo apt-get update && sudo apt-get install -y tar
           fi
-      - name: Cache cargo-make
-        id: cargo-make-cache
+      - name: Cache cargo-installed binaries
+        id: cache-bins
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/bin/cargo-make
-          key: cargo-make-${{ env.CARGO_MAKE_VERSION }}
-      - name: Install cargo-make
-        if: steps.cargo-make-cache.outputs.cache-hit != 'true'
-        run: cargo install cargo-make --version ${{ env.CARGO_MAKE_VERSION }} --locked
-      - name: Cache fdev
-        id: fdev-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/fdev
-          key: fdev-${{ env.FDEV_VERSION }}
-      - name: Install fdev
-        if: steps.fdev-cache.outputs.cache-hit != 'true'
-        run: cargo install fdev --version ${{ env.FDEV_VERSION }} --locked
+          path: |
+            ~/.cargo/bin/cargo-make
+            ~/.cargo/bin/cargo-binstall
+            ~/.cargo/bin/fdev
+          key: ${{ runner.os }}-cargo-bins-make-${{ env.CARGO_MAKE_VERSION }}-fdev-${{ env.FDEV_VERSION }}
+      - name: Install cargo-binstall
+        if: steps.cache-bins.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@cargo-binstall
+      - name: Install cargo-make + fdev
+        if: steps.cache-bins.outputs.cache-hit != 'true'
+        run: |
+          cargo binstall -y --force --version ${{ env.CARGO_MAKE_VERSION }} cargo-make
+          cargo binstall -y --force --version ${{ env.FDEV_VERSION }} fdev || \
+            cargo install fdev --version ${{ env.FDEV_VERSION }} --locked
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -73,17 +73,43 @@ jobs:
           cache: npm
           cache-dependency-path: |
             web/package-lock.json
-      - name: Install cargo-make
-        run: cargo install cargo-make --locked
-      - name: Install fdev
-        run: cargo install fdev --version ${{ env.FDEV_VERSION }} --locked
+      - name: Cache cargo-installed binaries
+        id: cache-bins
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-make
+            ~/.cargo/bin/cargo-binstall
+            ~/.cargo/bin/fdev
+          key: ${{ runner.os }}-cargo-bins-make-${{ env.CARGO_MAKE_VERSION }}-fdev-${{ env.FDEV_VERSION }}-playwright
+      - name: Install cargo-binstall
+        if: steps.cache-bins.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@cargo-binstall
+      - name: Install cargo-make + fdev
+        if: steps.cache-bins.outputs.cache-hit != 'true'
+        run: |
+          cargo binstall -y --force --version ${{ env.CARGO_MAKE_VERSION }} cargo-make
+          cargo binstall -y --force --version ${{ env.FDEV_VERSION }} fdev || \
+            cargo install fdev --version ${{ env.FDEV_VERSION }} --locked
       - name: Build offline UI
         run: cargo make build-ui-offline
-      - name: Install Playwright deps
-        run: |
-          cd web/tests
-          npm install
-          npx playwright install --with-deps
+      - name: Install Playwright npm deps
+        run: npm install
+        working-directory: web/tests
+      - name: Cache Playwright browsers
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-1.48.0-chromium-firefox-webkit
+      - name: Install Playwright browsers
+        if: steps.cache-playwright.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium firefox webkit
+        working-directory: web/tests
+      - name: Install Playwright system deps (cache hit path)
+        if: steps.cache-playwright.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium firefox webkit
+        working-directory: web/tests
       - name: Run Playwright
         run: cargo make test-ui-playwright
       - name: Upload Playwright report on failure
@@ -91,5 +117,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
-          path: web/tests/playwright-report
+          path: |
+            web/tests/playwright-report
+            web/tests/test-results
           retention-days: 14

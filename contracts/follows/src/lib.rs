@@ -62,9 +62,11 @@ impl ContractInterface for FollowGraph {
             UpdateData::Delta(d) => d.as_ref(),
             UpdateData::State(s) => s.as_ref(),
             UpdateData::StateAndDelta { delta, .. } => delta.as_ref(),
-            _ => return Ok(UpdateModification::valid(State::from(
-                serde_json::to_vec(&graph).map_err(|e| ContractError::Other(format!("{e}")))?
-            ))),
+            _ => {
+                return Ok(UpdateModification::valid(State::from(
+                    serde_json::to_vec(&graph).map_err(|e| ContractError::Other(format!("{e}")))?,
+                )));
+            }
         };
         let actions = serde_json::from_slice::<Vec<FollowAction>>(delta_bytes)
             .map_err(|_| ContractError::InvalidDelta)?;
@@ -81,8 +83,8 @@ impl ContractInterface for FollowGraph {
             }
         }
 
-        let bytes = serde_json::to_vec(&graph)
-            .map_err(|err| ContractError::Other(format!("{err}")))?;
+        let bytes =
+            serde_json::to_vec(&graph).map_err(|err| ContractError::Other(format!("{err}")))?;
         Ok(UpdateModification::valid(State::from(bytes)))
     }
 
@@ -98,8 +100,7 @@ impl ContractInterface for FollowGraph {
             .map(|(k, v)| (k.as_str(), v.len()))
             .collect();
         Ok(StateSummary::from(
-            serde_json::to_vec(&summary)
-                .map_err(|err| ContractError::Other(format!("{err}")))?,
+            serde_json::to_vec(&summary).map_err(|err| ContractError::Other(format!("{err}")))?,
         ))
     }
 
@@ -169,7 +170,7 @@ mod test {
             !new_state
                 .follows
                 .get("alice_pk")
-                .map_or(false, |s| s.contains("bob_pk"))
+                .is_some_and(|s| s.contains("bob_pk"))
         );
     }
 
@@ -218,10 +219,8 @@ mod test {
         )
         .unwrap();
 
-        let g1: FollowGraph =
-            serde_json::from_slice(result1_2.unwrap_valid().as_ref()).unwrap();
-        let g2: FollowGraph =
-            serde_json::from_slice(result2_1.unwrap_valid().as_ref()).unwrap();
+        let g1: FollowGraph = serde_json::from_slice(result1_2.unwrap_valid().as_ref()).unwrap();
+        let g2: FollowGraph = serde_json::from_slice(result2_1.unwrap_valid().as_ref()).unwrap();
 
         assert_eq!(g1.follows["alice_pk"], g2.follows["alice_pk"]);
     }
