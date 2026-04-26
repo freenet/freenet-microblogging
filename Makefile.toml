@@ -109,14 +109,21 @@ set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
 cargo build --profile "${BUILD_PROFILE}" --target "${CONTRACT_TARGET}" \
     -p freenet-microblogging-web --features freenet-main-contract
-# Cargo places cdylib output in deps/ for this crate config. Mirror to release/
-# root so downstream tasks (sign-webapp, update-published-contract) find it at
-# the conventional path mail uses.
+# Cargo cdylib output ends up at release/<name>.wasm on Linux but only at
+# release/deps/<name>.wasm on macOS for this crate config. Ensure the
+# conventional release/ path exists so downstream tasks (sign-webapp,
+# update-published-contract) can find it on either OS.
 SRC="$ROOT/target/${CONTRACT_TARGET}/release/deps/freenet_microblogging_web.wasm"
 DST="$ROOT/target/${CONTRACT_TARGET}/release/freenet_microblogging_web.wasm"
-[ -f "$SRC" ] || { echo "error: expected $SRC after build" >&2; exit 1; }
-cp "$SRC" "$DST"
-echo "wrote $DST ($(wc -c < "$DST") bytes)"
+if [ -f "$DST" ]; then
+    echo "$DST already at conventional path ($(wc -c < "$DST") bytes)"
+elif [ -f "$SRC" ]; then
+    cp "$SRC" "$DST"
+    echo "wrote $DST ($(wc -c < "$DST") bytes)"
+else
+    echo "error: web container WASM not found at $SRC or $DST" >&2
+    exit 1
+fi
 '''
 
 [tasks.build-ui]
