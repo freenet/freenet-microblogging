@@ -60,6 +60,7 @@ jobs:
       - name: Rebuild test-signed contract
         run: cargo make update-published-contract
       - name: Compare rebuilt snapshot against committed
+        id: drift
         run: |
           if ! git diff --exit-code -- published-contract/; then
             echo "::error::published-contract/ drifted from source."
@@ -70,6 +71,16 @@ jobs:
             echo "Refresh with:"
             echo "  cargo make update-published-contract"
             echo "  git add published-contract/ && git commit"
+            echo ""
+            echo "Or download the 'published-contract-rebuilt' artifact from this run"
+            echo "and commit it directly."
             exit 1
           fi
           echo "published-contract/ is in sync with source"
+      - name: Upload rebuilt snapshot on drift
+        if: failure() && steps.drift.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-contract-rebuilt
+          path: published-contract/
+          retention-days: 14
