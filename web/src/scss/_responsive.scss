@@ -1,33 +1,31 @@
-// Responsive breakpoints, bottom nav, FAB
+// Responsive breakpoints (X / Twitter-style)
+//   Mobile  (<500):  icon sidebar 52, no right panel, FAB
+//   Compact (500–988): icon sidebar 64, feed full, no right panel
+//   Medium  (988–1280): icon sidebar 80, feed, right panel 290
+//   Large   (>1280):   labelled sidebar 275, feed, right panel 350
 
-// ── Breakpoint variables ──────────────────────────────────────────────────────
-// Mobile:   < 768px   — single column, bottom tab bar, FAB
-// Tablet:   768–1024px — icon-only sidebar 68px + feed, no right panel
-// Desktop:  1024–1280px — 3 columns, narrower right panel 280px
-// Large:    > 1280px — full 3 columns at designed proportions
-
-// ── Tablet (768–1024px) ───────────────────────────────────────────────────────
-@media (min-width: 768px) and (max-width: 1024px) {
+// ── Icon-only sidebar (shared) ─────────────────────────────────────────────
+@mixin sidebar-icon-only($width, $item) {
   .app-layout {
-    --sidebar-width: 68px;
+    --sidebar-width: #{$width};
   }
 
   .sidebar {
-    width: 68px;
-    padding: 0 8px;
+    width: $width;
+    padding: 12px 6px;
     align-items: center;
     overflow: visible;
   }
 
   .sidebar-logo {
-    padding: 16px 0 8px;
+    padding: 6px 0 12px;
     justify-content: center;
     gap: 0;
+    border-bottom-color: transparent;
+    margin-bottom: 6px;
   }
 
-  .sidebar-logo__text {
-    display: none;
-  }
+  .sidebar-logo__text { display: none; }
 
   .sidebar-nav {
     align-items: center;
@@ -36,59 +34,83 @@
 
   .nav-item {
     justify-content: center;
-    padding: 12px;
+    padding: 9px;
     gap: 0;
-    width: 48px;
-    height: 48px;
+    width: $item;
+    height: $item;
   }
 
-  .nav-item__label {
-    display: none;
-  }
+  .nav-item__label { display: none; }
 
   .sidebar-post-btn {
-    width: 48px;
-    height: 48px;
+    width: $item;
+    height: $item;
     padding: 0;
-    font-size: 0; // Hide text
+    font-size: 0;
+    margin: 4px 0 12px;
     position: relative;
 
-    // Show a "+" icon instead
     &::before {
       content: '+';
-      font-size: 24px;
-      font-weight: 400;
-      color: #ffffff;
+      font-family: var(--font-display);
+      font-style: italic;
+      font-size: 22px;
+      color: var(--surface-0);
     }
   }
 
   .sidebar-profile {
     justify-content: center;
-    padding: 12px;
+    padding: 8px;
     gap: 0;
   }
 
-  .sidebar-profile__info {
-    display: none;
-  }
+  .sidebar-profile__info { display: none; }
 
-  .right-panel {
-    display: none;
-  }
+  .sidebar-status,
+  .sidebar-section-label { display: none; }
 }
 
-// ── Desktop (1024–1280px) — narrower right panel ──────────────────────────────
-@media (min-width: 1024px) and (max-width: 1280px) {
+// ── Mobile (<500px) — narrow icon sidebar, FAB, no right panel ─────────────
+@media (max-width: 499px) {
+  @include sidebar-icon-only(52px, 40px);
+
+  .app-layout { border: none; }
+
+  .right-panel,
+  .right-panel-col { display: none; }
+
+  .feed-column { border-right: none; }
+
+  .feed-header { padding: 0; }
+
+  .compose-box { padding: 12px 14px 4px; }
+  .post-card { padding: 12px 14px 10px; }
+
+  .compose-box__textarea { font-size: 16px; }
+}
+
+// ── Compact (500–988px) — icon sidebar, no right panel ─────────────────────
+@media (min-width: 500px) and (max-width: 987px) {
+  @include sidebar-icon-only(64px, 44px);
+
+  .right-panel,
+  .right-panel-col { display: none; }
+}
+
+// ── Medium (988–1280px) — icon sidebar + right panel ───────────────────────
+@media (min-width: 988px) and (max-width: 1279px) {
+  @include sidebar-icon-only(80px, 48px);
+
   .app-layout {
-    --right-panel-width: 280px;
+    --right-panel-width: 290px;
   }
-
-  .right-panel {
-    width: 280px;
+  .right-panel-col {
+    width: 290px;
   }
 }
 
-// ── Large desktop (> 1280px) ──────────────────────────────────────────────────
+// ── Large (≥1280px) — labelled sidebar, full proportions ───────────────────
 @media (min-width: 1280px) {
   .app-layout {
     --sidebar-width: 275px;
@@ -96,148 +118,35 @@
   }
 }
 
-// ── Mobile (< 768px) ──────────────────────────────────────────────────────────
-@media (max-width: 767px) {
-  .app-layout {
-    flex-direction: column;
-  }
+// ── Bottom nav — disabled (X uses persistent icon sidebar instead) ─────────
+.bottom-nav { display: none !important; }
 
-  // Hide the sidebar entirely on mobile
-  .sidebar {
-    display: none;
-  }
-
-  // Hide the right panel on mobile
-  .right-panel {
-    display: none;
-  }
-
-  // Feed takes full width
-  .feed-column {
-    width: 100%;
-    border-right: none;
-    // Add bottom padding for bottom nav bar
-    padding-bottom: 56px;
-  }
-
-  // Compose textarea font size adjustment
-  .compose-box__textarea {
-    font-size: 17px;
-  }
-}
-
-// ── Bottom nav bar (mobile only) ──────────────────────────────────────────────
-.bottom-nav {
-  display: none;
-
-  @media (max-width: 767px) {
-    display: flex;
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    z-index: 100;
-    height: 56px;
-    background: var(--bg-elevated);
-    border-top: 1px solid var(--border-strong);
-    align-items: center;
-    justify-content: space-around;
-    padding: 0 8px;
-    // Safe area for iOS
-    padding-bottom: env(safe-area-inset-bottom, 0);
-  }
-}
-
-.bottom-nav__item {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-  position: relative;
-  font-size: 24px;
-
-  &:hover {
-    background: var(--bg-hover);
-    color: var(--text-secondary);
-  }
-
-  &--active {
-    color: var(--accent);
-  }
-
-  // Active indicator dot (optional)
-  &--active::after {
-    content: '';
-    position: absolute;
-    bottom: 4px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 4px;
-    height: 4px;
-    border-radius: 50%;
-    background: var(--accent);
-  }
-}
-
-// ── FAB — compose button (mobile only) ───────────────────────────────────────
+// ── FAB (mobile compose, <500px only) ──────────────────────────────────────
 .fab-compose {
   display: none;
 
-  @media (max-width: 767px) {
+  @media (max-width: 499px) {
     display: flex;
     position: fixed;
-    bottom: 72px; // above bottom nav
+    bottom: 18px;
     right: 16px;
     z-index: 99;
-    width: 56px;
-    height: 56px;
+    width: 52px;
+    height: 52px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
-    color: #ffffff;
+    background: var(--ink-0);
+    color: var(--surface-0);
+    font-family: var(--font-display);
+    font-style: italic;
     font-size: 24px;
     align-items: center;
     justify-content: center;
     cursor: pointer;
     border: none;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    box-shadow: var(--shadow-md);
+    transition: transform 0.15s, background 0.14s;
 
-    &:hover {
-      transform: scale(1.05);
-      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
-    }
-
-    &:active {
-      transform: scale(0.97);
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
-    }
-  }
-}
-
-// ── Feed header adjustments on mobile ─────────────────────────────────────────
-@media (max-width: 767px) {
-  .feed-header {
-    padding: 10px 16px 0;
-  }
-
-  .feed-header__title {
-    font-size: 18px;
-    padding-bottom: 8px;
-  }
-
-  .post-card {
-    padding: 10px 12px;
-  }
-}
-
-// ── Right panel visible on tablet+ ────────────────────────────────────────────
-@media (min-width: 768px) and (max-width: 1024px) {
-  .right-panel {
-    display: none;
+    &:hover { transform: scale(1.04); background: var(--ink-1); }
+    &:active { transform: scale(0.97); }
   }
 }

@@ -1,42 +1,41 @@
 /**
  * First-visit onboarding screen.
  * Renders a full-screen overlay asking the user for a display name.
- * Uses CSS custom properties from the app's design system where possible,
- * with inline styles so no SCSS changes are needed.
  */
 
-import { APP_NAME } from "../branding";
+import { APP_NAME, APP_LOGO_URL } from "../branding";
 
 export function createOnboarding(
   onComplete: (displayName: string, secretKey?: string) => void
 ): HTMLElement {
-  // Inject component-scoped styles once
   injectStyles();
 
-  // Overlay backdrop
   const overlay = document.createElement("div");
   overlay.className = "onboarding-overlay";
 
-  // Card
   const card = document.createElement("div");
   card.className = "onboarding-card";
 
-  // App logo mark — first character of the app name
-  const logo = document.createElement("div");
+  // App logo
+  const logo = document.createElement("img");
   logo.className = "onboarding-logo";
-  logo.textContent = APP_NAME.charAt(0).toUpperCase();
+  logo.src = APP_LOGO_URL;
+  logo.alt = `${APP_NAME} logo`;
+  logo.draggable = false;
 
-  // Title
+  // Tagline above title
+  const tagline = document.createElement("div");
+  tagline.className = "onboarding-tagline";
+  tagline.textContent = "Decentralized Microblog";
+
   const title = document.createElement("h1");
   title.className = "onboarding-title";
   title.textContent = `Welcome to ${APP_NAME}`;
 
-  // Subtitle
   const subtitle = document.createElement("p");
   subtitle.className = "onboarding-subtitle";
   subtitle.textContent = "Choose your display name to get started";
 
-  // Input
   const input = document.createElement("input");
   input.className = "onboarding-input";
   input.type = "text";
@@ -45,18 +44,15 @@ export function createOnboarding(
   input.setAttribute("autocomplete", "off");
   input.setAttribute("spellcheck", "false");
 
-  // Join button (disabled until input has text)
   const button = document.createElement("button");
   button.className = "onboarding-btn";
   button.textContent = "Join";
   button.disabled = true;
 
-  // Enable / disable button as user types
   input.addEventListener("input", () => {
     button.disabled = input.value.trim().length === 0;
   });
 
-  // Submit handler
   const submit = () => {
     const name = input.value.trim();
     if (!name) return;
@@ -69,25 +65,22 @@ export function createOnboarding(
     if (e.key === "Enter") submit();
   });
 
-  // Import link
   const importLink = document.createElement("button");
   importLink.className = "onboarding-import-link";
   importLink.textContent = "Import existing identity";
   importLink.addEventListener("click", () => {
-    // Toggle import section
     importSection.style.display = importSection.style.display === "none" ? "flex" : "none";
     nameSection.style.display = nameSection.style.display === "none" ? "flex" : "none";
   });
 
-  // Name section (default)
   const nameSection = document.createElement("div");
-  nameSection.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:12px;width:100%";
+  nameSection.className = "onboarding-section";
   nameSection.appendChild(input);
   nameSection.appendChild(button);
 
-  // Import section (hidden by default)
   const importSection = document.createElement("div");
-  importSection.style.cssText = "display:none;flex-direction:column;align-items:center;gap:12px;width:100%";
+  importSection.className = "onboarding-section";
+  importSection.style.display = "none";
 
   const importInput = document.createElement("input");
   importInput.className = "onboarding-input";
@@ -96,11 +89,10 @@ export function createOnboarding(
   importInput.maxLength = 50;
 
   const secretInput = document.createElement("input");
-  secretInput.className = "onboarding-input";
+  secretInput.className = "onboarding-input onboarding-input--mono";
   secretInput.type = "password";
   secretInput.placeholder = "Secret key (64 hex characters)";
   secretInput.maxLength = 64;
-  secretInput.style.fontFamily = "monospace";
 
   const importBtn = document.createElement("button");
   importBtn.className = "onboarding-btn";
@@ -126,6 +118,7 @@ export function createOnboarding(
   importSection.appendChild(importBtn);
 
   card.appendChild(logo);
+  card.appendChild(tagline);
   card.appendChild(title);
   card.appendChild(subtitle);
   card.appendChild(nameSection);
@@ -133,7 +126,6 @@ export function createOnboarding(
   card.appendChild(importSection);
   overlay.appendChild(card);
 
-  // Auto-focus the input after mount (next tick)
   requestAnimationFrame(() => input.focus());
 
   return overlay;
@@ -151,111 +143,141 @@ function injectStyles(): void {
       position: fixed;
       inset: 0;
       z-index: 9999;
-      background: rgba(0, 0, 0, 0.55);
+      background: rgba(15, 23, 42, 0.24);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-family: var(--font-stack, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+      animation: veilIn 0.18s ease;
     }
+    @keyframes veilIn { from { opacity: 0; } to { opacity: 1; } }
 
     .onboarding-card {
-      background: var(--bg-elevated, #ffffff);
-      border-radius: var(--radius-card, 16px);
-      padding: 40px 36px;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-card-lg, 14px);
+      padding: 36px 32px 28px;
       width: 100%;
-      max-width: 400px;
-      box-shadow: 0 8px 40px rgba(0, 0, 0, 0.18);
+      max-width: 380px;
+      box-shadow: var(--shadow-lg);
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 12px;
+      gap: 8px;
+      animation: sheetUp 0.22s cubic-bezier(0.34, 1.28, 0.64, 1) both;
     }
 
     .onboarding-logo {
-      width: 56px;
-      height: 56px;
-      border-radius: 50%;
-      background: var(--accent, #0066cc);
-      color: #fff;
-      font-size: 26px;
-      font-weight: 700;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      width: 64px;
+      height: 64px;
+      object-fit: contain;
+      user-select: none;
+      -webkit-user-drag: none;
+      margin-bottom: 4px;
+    }
+
+    .onboarding-tagline {
+      font-family: var(--font-mono);
+      font-size: 8.5px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--ink-4);
       margin-bottom: 4px;
     }
 
     .onboarding-title {
       margin: 0;
-      font-size: 22px;
-      font-weight: 700;
-      color: var(--text-primary, #000);
+      font-family: var(--font-display);
+      font-size: 24px;
+      font-weight: 400;
+      letter-spacing: -0.04em;
+      color: var(--ink-0);
       text-align: center;
+      line-height: 1.15;
     }
 
     .onboarding-subtitle {
-      margin: 0 0 8px;
-      font-size: 15px;
-      color: var(--text-muted, #64748b);
+      margin: 4px 0 14px;
+      font-family: var(--font-body);
+      font-size: 13px;
+      color: var(--ink-3);
       text-align: center;
+      letter-spacing: -0.005em;
+    }
+
+    .onboarding-section {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
+      width: 100%;
     }
 
     .onboarding-input {
       width: 100%;
       box-sizing: border-box;
-      padding: 10px 14px;
-      font-size: 15px;
-      font-family: inherit;
-      color: var(--text-primary, #000);
-      background: var(--bg-primary, #f8fafc);
-      border: 1px solid var(--border-strong, #e5e7eb);
-      border-radius: var(--radius-pill, 9999px);
+      padding: 9px 12px;
+      height: 36px;
+      font-family: var(--font-body);
+      font-size: 13px;
+      letter-spacing: -0.005em;
+      color: var(--ink-0);
+      background: rgba(239, 246, 255, 0.8);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-input, 8px);
       outline: none;
-      transition: border-color 0.15s;
+      transition: border-color 0.18s, background 0.18s;
+    }
+
+    .onboarding-input::placeholder { color: var(--ink-4); }
+
+    .onboarding-input--mono {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      letter-spacing: 0.02em;
     }
 
     .onboarding-input:focus {
-      border-color: var(--accent, #0066cc);
-      box-shadow: 0 0 0 3px var(--accent-soft, rgba(0,102,204,0.10));
+      background: rgba(255, 255, 255, 0.95);
+      border-color: var(--accent-mid);
     }
 
     .onboarding-btn {
       width: 100%;
-      padding: 10px 0;
-      font-size: 16px;
-      font-weight: 600;
-      font-family: inherit;
-      color: #fff;
-      background: var(--accent, #0066cc);
+      padding: 9px 0;
+      height: 36px;
+      font-family: var(--font-display);
+      font-style: italic;
+      font-weight: 400;
+      font-size: 14px;
+      letter-spacing: -0.01em;
+      color: var(--surface-0);
+      background: var(--ink-0);
       border: none;
-      border-radius: var(--radius-pill, 9999px);
+      border-radius: 9px;
       cursor: pointer;
-      transition: background 0.15s, opacity 0.15s;
-      margin-top: 4px;
+      transition: background 0.14s, opacity 0.14s;
     }
 
-    .onboarding-btn:hover:not(:disabled) {
-      background: var(--accent-hover, #004c99);
-    }
+    .onboarding-btn:hover:not(:disabled) { background: var(--ink-1); }
 
     .onboarding-btn:disabled {
-      opacity: 0.45;
+      opacity: 0.4;
       cursor: not-allowed;
     }
 
     .onboarding-import-link {
       background: none;
       border: none;
-      color: var(--accent, #0066cc);
-      font-size: 13px;
+      color: var(--ink-3);
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
       cursor: pointer;
-      padding: 4px 0;
-      font-family: inherit;
+      padding: 8px 0 0;
     }
 
-    .onboarding-import-link:hover {
-      text-decoration: underline;
-    }
+    .onboarding-import-link:hover { color: var(--accent); }
   `;
   document.head.appendChild(style);
 }

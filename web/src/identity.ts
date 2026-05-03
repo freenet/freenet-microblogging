@@ -21,6 +21,13 @@ let delegateApi: FreenetWsApi | null = null;
 let delegateKeyBytes: number[] | null = null;
 let delegateCodeHashBytes: number[] | null = null;
 
+type ExportListener = (secretKey: string) => void;
+let exportListener: ExportListener | null = null;
+
+export function onIdentityExported(listener: ExportListener): void {
+  exportListener = listener;
+}
+
 export function connectDelegate(
   api: FreenetWsApi,
   keyBytes: number[],
@@ -69,7 +76,12 @@ export function createIdentity(displayName: string, secretKey?: string): Identit
 }
 
 export function exportIdentity(): void {
-  if (!isDelegateConnected()) return;
+  if (!isDelegateConnected()) {
+    // Offline / no delegate: synthesize a placeholder so the modal still appears
+    // and the user understands export is not available without a node.
+    exportListener?.("(offline mode — connect to a Freenet node to export your real key)");
+    return;
+  }
   sendIdentityMessage(delegateApi!, delegateKeyBytes!, delegateCodeHashBytes!, {
     type: "ExportIdentity",
   }).catch((e) => console.warn("[identity] Export failed:", e));
@@ -102,7 +114,7 @@ export function applyDelegateIdentity(payload: object): boolean {
   }
 
   if (p.type === "ExportedIdentity" && p.secret_key) {
-    alert(`Your secret key (save this to import on another device):\n\n${p.secret_key}`);
+    exportListener?.(p.secret_key);
     return true;
   }
 

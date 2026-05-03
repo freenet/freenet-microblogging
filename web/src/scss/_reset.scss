@@ -1,4 +1,5 @@
-// Minimal reset
+// Reset + body atmosphere
+
 *,
 *::before,
 *::after {
@@ -13,14 +14,21 @@ html {
 }
 
 body {
-  font-family: var(--font-stack);
-  font-size: var(--font-size-base);
+  font-family: var(--font-body);
+  font-size: 14.5px;
   font-weight: 400;
-  line-height: var(--line-height-base);
-  background: var(--bg-primary);
-  color: var(--text-secondary);
+  line-height: 1.5;
+  color: var(--ink-1);
+  background-color: var(--surface-0);
+  background-image:
+    radial-gradient(ellipse 65% 45% at 12% -8%,
+      rgba(0, 102, 204, 0.055) 0%, transparent 55%),
+    radial-gradient(ellipse 55% 65% at 92% 108%,
+      rgba(51, 153, 102, 0.055) 0%, transparent 50%);
+  background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 a {
@@ -35,6 +43,7 @@ button {
   border: none;
   background: none;
   padding: 0;
+  color: inherit;
 }
 
 input,
@@ -44,6 +53,7 @@ textarea {
   border: none;
   outline: none;
   background: transparent;
+  color: inherit;
 }
 
 textarea {
@@ -58,4 +68,28 @@ img {
 ul,
 ol {
   list-style: none;
+}
+
+// Pulsing live dot — used by status indicators across the app
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0   rgba(51, 153, 102, 0.5); }
+  50%       { box-shadow: 0 0 0 5px rgba(51, 153, 102, 0); }
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes sheetUp {
+  from { transform: translateY(22px) scale(0.97); opacity: 0; }
+  to   { transform: none; opacity: 1; }
+}
+
+// Thin scrollbars throughout
+::-webkit-scrollbar { width: 3px; height: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 2px;
 }

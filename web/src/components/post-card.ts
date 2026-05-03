@@ -99,25 +99,30 @@ export function createPostCard(post: Post): HTMLElement {
     followBtn.className = "post-card__follow-btn";
     followBtn.textContent = "Follow";
     followBtn.style.cssText = [
-      "font-size:13px",
-      "font-weight:600",
-      "color:var(--accent)",
+      "font-family:var(--font-mono)",
+      "font-size:9px",
+      "font-weight:400",
+      "letter-spacing:0.08em",
+      "text-transform:uppercase",
+      "color:var(--ink-2)",
       "background:transparent",
-      "border:1px solid var(--accent)",
-      "border-radius:9999px",
-      "padding:2px 10px",
+      "border:1px solid var(--line)",
+      "border-radius:7px",
+      "padding:2px 8px",
       "cursor:pointer",
       "margin-left:4px",
-      "transition:background 0.15s ease,color 0.15s ease",
+      "transition:background 0.12s,color 0.12s,border-color 0.12s",
       "flex-shrink:0",
     ].join(";");
     followBtn.addEventListener("mouseenter", () => {
-      followBtn.style.background = "var(--accent)";
-      followBtn.style.color = "#fff";
+      followBtn.style.background = "var(--ink-0)";
+      followBtn.style.color = "var(--surface-0)";
+      followBtn.style.borderColor = "var(--ink-0)";
     });
     followBtn.addEventListener("mouseleave", () => {
       followBtn.style.background = "transparent";
-      followBtn.style.color = "var(--accent)";
+      followBtn.style.color = "var(--ink-2)";
+      followBtn.style.borderColor = "var(--line)";
     });
     followBtn.addEventListener("click", (e) => {
       e.stopPropagation();

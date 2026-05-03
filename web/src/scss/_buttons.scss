@@ -1,21 +1,24 @@
-// All button variants
+// Buttons — three levels: primary (dark ink), secondary (outlined), ghost.
 
-// ── Base ──────────────────────────────────────────────────────────────────────
+// ── Base ────────────────────────────────────────────────────────────────────
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  font-family: var(--font-stack);
-  font-size: var(--font-size-base);
-  font-weight: 700;
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
   line-height: 1;
   cursor: pointer;
   border: none;
-  border-radius: var(--radius-pill);
-  transition: opacity 0.15s ease, background 0.15s ease, transform 0.1s ease;
+  border-radius: var(--radius-button);
+  transition: background 0.12s, color 0.12s, border-color 0.12s, transform 0.1s;
   white-space: nowrap;
   text-decoration: none;
+  padding: 6px 15px;
+  height: 30px;
 
   &:disabled {
     opacity: 0.4;
@@ -24,123 +27,120 @@
   }
 
   &:active:not(:disabled) {
-    transform: scale(0.97);
+    transform: scale(0.98);
   }
 }
 
-// ── Primary (Post / CTA) ──────────────────────────────────────────────────────
-// Used for the main sidebar Post button
+// ── Primary (dark ink) ──────────────────────────────────────────────────────
 .btn--primary {
-  padding: 12px 24px;
-  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
-  color: #ffffff;
-  font-size: var(--font-size-post-btn);
-  border-radius: var(--radius-pill);
+  background: var(--ink-0);
+  color: var(--surface-0);
 
-  &:hover:not(:disabled) {
-    opacity: 0.9;
-  }
+  &:hover:not(:disabled) { background: var(--ink-1); }
 }
 
-// ── Post Inline ───────────────────────────────────────────────────────────────
-// Used in compose box and reply dialogs
+// ── Post (compose footer) — italic editorial CTA ───────────────────────────
 .btn--post {
-  padding: 8px 20px;
-  background: var(--accent);
-  color: #ffffff;
-  font-size: var(--font-size-base);
-  border-radius: 20px;
+  padding: 7px 18px;
+  height: 32px;
+  background: var(--ink-0);
+  color: var(--surface-0);
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 13.5px;
+  letter-spacing: -0.01em;
+  border-radius: 9px;
+
+  &:hover:not(:disabled) { background: var(--ink-1); }
+}
+
+// ── Secondary (outlined) ────────────────────────────────────────────────────
+.btn--secondary {
+  background: transparent;
+  color: var(--ink-2);
+  border: 1px solid var(--line);
 
   &:hover:not(:disabled) {
-    background: var(--accent-hover);
+    background: var(--surface-hover);
+    color: var(--ink-0);
+    border-color: var(--surface-3);
   }
 }
 
-// ── Follow ────────────────────────────────────────────────────────────────────
-// Light: black bg / white text  |  Dark: white bg / black text
+// ── Follow / Unfollow ───────────────────────────────────────────────────────
 .btn--follow {
-  padding: 8px 20px;
-  background: var(--text-primary);
-  color: var(--bg-elevated);
-  font-size: var(--font-size-base);
-  border-radius: 20px;
+  background: var(--ink-0);
+  color: var(--surface-0);
 
-  &:hover:not(:disabled) {
-    opacity: 0.85;
-  }
+  &:hover:not(:disabled) { background: var(--ink-1); }
 }
 
-// ── Unfollow (outline variant) ────────────────────────────────────────────────
 .btn--unfollow {
-  padding: 7px 19px;
   background: transparent;
-  color: var(--text-primary);
-  font-size: var(--font-size-base);
-  border-radius: 20px;
-  border: 1px solid var(--border-strong);
+  color: var(--ink-2);
+  border: 1px solid var(--line);
 
   &:hover:not(:disabled) {
-    border-color: var(--error);
-    color: var(--error);
-    background: rgba(220, 38, 38, 0.05);
+    border-color: var(--danger);
+    color: var(--danger);
+    background: rgba(176, 48, 32, 0.04);
   }
 }
 
-// ── Ghost / Text ──────────────────────────────────────────────────────────────
+// ── Ghost ───────────────────────────────────────────────────────────────────
 .btn--ghost {
-  padding: 8px 16px;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--ink-3);
 
   &:hover:not(:disabled) {
-    background: var(--bg-hover);
-    color: var(--text-secondary);
+    background: rgba(16, 20, 36, 0.04);
+    color: var(--ink-1);
   }
 }
 
-// ── Icon button (circle) ──────────────────────────────────────────────────────
+// ── Icon button (round) ────────────────────────────────────────────────────
 .btn--icon {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   border-radius: 50%;
   background: transparent;
-  color: var(--text-muted);
-  font-size: 18px;
+  color: var(--ink-3);
+  font-size: 16px;
 
   &:hover:not(:disabled) {
-    background: var(--bg-hover);
-    color: var(--text-secondary);
+    background: rgba(16, 20, 36, 0.04);
+    color: var(--ink-1);
   }
 
-  // Color variants on hover (used in action bars)
   &.btn--icon-accent:hover:not(:disabled) {
-    background: var(--accent-soft);
+    background: var(--accent-bg);
     color: var(--accent);
   }
 
   &.btn--icon-success:hover:not(:disabled) {
-    background: rgba(51, 153, 102, 0.12);
-    color: var(--success);
+    background: var(--trust-bg);
+    color: var(--trust);
   }
 
   &.btn--icon-error:hover:not(:disabled) {
-    background: rgba(220, 38, 38, 0.10);
-    color: var(--error);
+    background: rgba(176, 48, 32, 0.10);
+    color: var(--danger);
   }
 }
 
-// ── Size modifiers ────────────────────────────────────────────────────────────
+// ── Size modifiers ─────────────────────────────────────────────────────────
 .btn--sm {
-  padding: 6px 16px;
-  font-size: 14px;
+  padding: 4px 12px;
+  height: 26px;
+  font-size: 11.5px;
 }
 
 .btn--lg {
-  padding: 14px 28px;
-  font-size: var(--font-size-post-btn);
+  padding: 9px 20px;
+  height: 36px;
+  font-size: 13.5px;
 }
 
-.btn--full {
-  width: 100%;
-}
+.btn--full { width: 100%; }

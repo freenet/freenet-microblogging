@@ -24,7 +24,10 @@
 // 7. All button variants
 @use 'buttons';
 
-// 8. Dark mode overrides
+// 8. Modal dialogs
+@use 'modal';
+
+// 9. Dark mode overrides
 @use 'dark-mode';
 
 // 9. Responsive breakpoints, bottom nav, FAB

@@ -1,44 +1,74 @@
-// Design tokens — CSS custom properties
-// All color, spacing, and typography values defined here.
+// Freenet design system tokens
+// Editorial · warm · calm. Light-primary; dark variant in _dark-mode.scss.
 
 :root {
-  // Backgrounds
-  --bg-primary: #F8FAFC;
-  --bg-elevated: #FFFFFF;
-  --bg-hover: #F0F4F8;
+  // ── Surfaces ──
+  --surface-0: #f8fafc;
+  --surface-1: #f1f5f9;
+  --surface-2: #e5e7eb;
+  --surface-3: #cbd5e1;
 
-  // Text
-  --text-primary: #000000;
-  --text-secondary: #374151;
-  --text-muted: #64748B;
+  // ── Ink (text) ──
+  --ink-0: #111827;
+  --ink-1: #1f2937;
+  --ink-2: #374151;
+  --ink-3: #6b7280;
+  --ink-4: #9ca3af;
 
-  // Accent / interactive
-  --accent: #0066CC;
-  --accent-hover: #004C99;
-  --accent-soft: rgba(0, 102, 204, 0.10);
+  // ── Accent (Freenet blue) ──
+  --accent:     #0066cc;
+  --accent-bg:  #eff6ff;
+  --accent-mid: #bfdbfe;
 
-  // Semantic
-  --success: #339966;
-  --error: #DC2626;
+  // ── Trust (network green) ──
+  --trust:      #339966;
+  --trust-bg:   #dcfce7;
 
-  // Borders
-  --border: rgba(0, 0, 0, 0.06);
-  --border-strong: #E5E7EB;
+  // ── Danger (sparingly) ──
+  --danger:     #b03020;
 
-  // Layout
-  --sidebar-width: 275px;
-  --right-panel-width: 350px;
+  // ── Lines ──
+  --line:   rgba(100, 116, 139, 0.18);
+  --line-2: rgba(100, 116, 139, 0.10);
 
-  // Radius
-  --radius-pill: 9999px;
-  --radius-card: 16px;
+  // ── Interactive surfaces (hover / active backgrounds) ──
+  --surface-hover:  rgba(239, 246, 255, 0.88);
+  --surface-active: #ffffff;
 
-  // Typography
-  --font-stack: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-size-base: 15px;
-  --font-size-nav: 20px;
-  --font-size-section: 20px;
-  --font-size-logo: 22px;
-  --font-size-post-btn: 17px;
-  --line-height-base: 1.4;
+  // ── Shadows ──
+  --shadow-sm: 0 1px 3px rgba(0, 40, 100, 0.06);
+  --shadow-md: 0 4px 20px rgba(0, 40, 100, 0.08);
+  --shadow-lg: 0 20px 60px rgba(0, 40, 100, 0.14),
+               0 4px 12px rgba(0, 40, 100, 0.06);
+
+  // ── Fonts ──
+  --font-display: 'Fraunces', Georgia, serif;
+  --font-body:    'DM Sans', system-ui, sans-serif;
+  --font-mono:    'Geist Mono', ui-monospace, monospace;
+
+  // ── Layout ──
+  --sidebar-width: 218px;
+  --right-panel-width: 320px;
+  --topbar-height: 50px;
+
+  // ── Radius ──
+  --radius-button: 7px;
+  --radius-input: 8px;
+  --radius-card: 9px;
+  --radius-card-lg: 14px;
+
+  // ── Legacy aliases (kept for any inline-styled holdouts) ──
+  --bg-primary:    var(--surface-0);
+  --bg-elevated:   #ffffff;
+  --bg-hover:      var(--accent-bg);
+  --text-primary:  var(--ink-0);
+  --text-secondary: var(--ink-1);
+  --text-muted:    var(--ink-3);
+  --accent-hover:  #004c99;
+  --accent-soft:   var(--accent-bg);
+  --success:       var(--trust);
+  --error:         var(--danger);
+  --border:        var(--line-2);
+  --border-strong: var(--line);
+  --radius-pill:   9999px;
 }
