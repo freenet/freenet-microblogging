@@ -1,4 +1,4 @@
-// 2-column layout: sidebar | feed
+// 2-column layout: sidebar | feed-column (+ right panel on wide)
 
 #app {
   min-height: 100vh;
@@ -8,41 +8,32 @@
 .app-layout {
   display: flex;
   width: 100%;
-  max-width: 1280px;
+  max-width: 1300px;
   margin: 0 auto;
   min-height: 100vh;
   position: relative;
+  // Hairline edges so the centered shell reads as a defined surface,
+  // not a forgotten widget on wide monitors.
+  border-left: 1px solid var(--line-2);
+  border-right: 1px solid var(--line-2);
 }
 
 .sidebar {
   width: var(--sidebar-width);
   flex-shrink: 0;
-  border-right: 1px solid var(--border-strong);
+  background: rgba(241, 245, 249, 0.9);
+  border-right: 1px solid var(--line);
   min-height: 100vh;
   position: sticky;
   top: 0;
   height: 100vh;
   overflow-y: auto;
-  background: var(--bg-primary);
 }
 
 .feed-column {
   flex: 1;
   min-width: 0;
   min-height: 100vh;
-  background: var(--bg-primary);
-}
-
-// Scrollbar styling for sidebar
-.sidebar::-webkit-scrollbar {
-  width: 4px;
-}
-
-.sidebar::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.sidebar::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.55);
+  border-right: 1px solid var(--line);
 }

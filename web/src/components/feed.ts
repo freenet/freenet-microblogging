@@ -14,10 +14,6 @@ export function createFeed(
   const header = document.createElement("div");
   header.className = "feed-header";
 
-  const headerTitle = document.createElement("div");
-  headerTitle.className = "feed-header__title";
-  headerTitle.textContent = "Home";
-
   // Tab bar
   const tabBar = document.createElement("div");
   tabBar.className = "tab-bar";
@@ -35,7 +31,6 @@ export function createFeed(
   tabBar.appendChild(tabForYou);
   tabBar.appendChild(tabFollowing);
 
-  header.appendChild(headerTitle);
   header.appendChild(tabBar);
 
   // Post list

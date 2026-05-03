@@ -22,22 +22,28 @@ rm -f "$ROOT/web/model_code_hash.txt" "$ROOT/web/delegate_key.txt" \
 alias = "build"
 
 [tasks.build-posts]
-description = "Build posts contract WASM + write code_hash"
+description = "Build posts contract WASM + write code_hash + contract instance id"
 script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
 cd "$ROOT/contracts/posts"
 CARGO_TARGET_DIR="$ROOT/target" fdev build
+WASM="$ROOT/target/wasm32-unknown-unknown/release/freenet_microblogging_posts.wasm"
 hash=$(CARGO_TARGET_DIR="$ROOT/target" fdev inspect \
     "$ROOT/contracts/posts/build/freenet/freenet_microblogging_posts" code | \
     grep 'code hash:' | cut -d' ' -f3)
+# Contract instance id = blake3(code_hash || parameters). publish-posts uses
+# empty parameters, so compute the same id here for the UI to GET/UPDATE.
+instance_id=$(CARGO_TARGET_DIR="$ROOT/target" fdev get-contract-id --code "$WASM")
 mkdir -p "$ROOT/build"
 printf '%s' "$hash" > "$ROOT/build/posts_code_hash"
-# Legacy: vite.config.ts reads web/model_code_hash.txt for __MODEL_CONTRACT__.
-# Mirror until UI switches to include_str! pattern.
-printf '%s' "$hash" > "$ROOT/web/model_code_hash.txt"
-echo "wrote build/posts_code_hash + web/model_code_hash.txt: $hash"
+printf '%s' "$instance_id" > "$ROOT/build/posts_contract_id"
+# vite.config.ts reads web/model_code_hash.txt as __MODEL_CONTRACT__.
+# Web client treats it as instance id (used in ContractKey.fromInstanceId).
+printf '%s' "$instance_id" > "$ROOT/web/model_code_hash.txt"
+echo "wrote build/posts_code_hash:   $hash"
+echo "wrote build/posts_contract_id + web/model_code_hash.txt: $instance_id"
 '''
 
 [tasks.build-follows]
@@ -479,6 +485,20 @@ dependencies = [
     "publish-identity",
     "publish-webapp-test",
 ]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+PORT="${FREENET_NODE_PORT:-7509}"
+CID=$(cat "$ROOT/published-contract/contract-id.txt")
+URL="http://127.0.0.1:${PORT}/v1/contract/web/${CID}/"
+echo
+echo "──────────────────────────────────────────────────────────────"
+echo "  Webapp published. Open in browser:"
+echo
+echo "  $URL"
+echo "──────────────────────────────────────────────────────────────"
+'''
 
 [tasks.publish-production]
 description = "End-to-end PRODUCTION publish (use scripts/release.sh, not directly)"
@@ -528,7 +548,7 @@ cd "$ROOT/web/tests" && BASE_URL="http://localhost:$PORT" npx playwright test
 '''
 
 [tasks.clean-node]
-description = "Wipe local Freenet node state (macOS paths)"
+description = "Wipe local Freenet node state (macOS paths). Stop the node first."
 script_runner = "bash"
 script = '''
 set -euo pipefail
@@ -536,3 +556,7 @@ rm -rf "$HOME/Library/Application Support/The-Freenet-Project-Inc.Freenet"
 rm -rf "$HOME/Library/Caches/The-Freenet-Project-Inc.freenet"
 echo "wiped local Freenet node state"
 '''
+
+[tasks.republish-fresh]
+description = "Wipe node state then run publish-all. Stop run-node first, then restart it before this."
+dependencies = ["clean-node", "publish-all"]

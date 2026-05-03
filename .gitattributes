@@ -1,0 +1,12 @@
+# Normalize line endings: store as LF in repo, regardless of platform.
+* text=auto eol=lf
+
+# Explicit binary types (avoid line-ending normalization)
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.wasm  binary
+*.woff  binary
+*.woff2 binary

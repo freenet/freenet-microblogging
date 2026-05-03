@@ -2,13 +2,10 @@ import { createSidebar, SidebarView } from "./components/sidebar";
 import { createFeed } from "./components/feed";
 import { createProfile } from "./components/profile";
 import { createRightPanel } from "./components/right-panel";
-import { initTheme } from "./theme";
 import { getIdentity } from "./identity";
 import { Post } from "./types";
 
 export function createApp(publishFn?: (content: string) => Promise<boolean>): HTMLElement {
-  initTheme();
-
   const posts: Post[] = [];
   const followedPubkeys = new Set<string>();
 
@@ -76,13 +73,14 @@ export function createApp(publishFn?: (content: string) => Promise<boolean>): HT
 
   // Right panel column
   const rightCol = document.createElement("div");
+  rightCol.className = "right-panel-col";
   rightCol.style.cssText = [
-    "width:350px",
+    "width:var(--right-panel-width, 320px)",
     "flex-shrink:0",
-    "padding:0 16px",
+    "padding:0 18px",
     "min-height:100vh",
-    "border-left:1px solid var(--border-strong)",
-    "background:var(--bg-primary)",
+    "border-left:1px solid var(--line)",
+    "background:transparent",
   ].join(";");
 
   const rightPanel = createRightPanel();

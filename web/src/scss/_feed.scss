@@ -1,129 +1,122 @@
-// Feed column: header, tab bar, compose box, post cards
+// Feed column — header, tab bar, compose box, post cards
 
 .feed-column {
   display: flex;
   flex-direction: column;
 }
 
-// Feed header
+// ── Feed header (editorial) ─────────────────────────────────────────────────
 .feed-header {
   position: sticky;
   top: 0;
   z-index: 10;
-  background: var(--bg-elevated);
-  border-bottom: 1px solid var(--border-strong);
-  padding: 14px 16px 0;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-
-  [data-theme="dark"] & {
-    background: rgba(0, 0, 0, 0.65);
-  }
+  background: rgba(248, 250, 252, 0.96);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
 }
 
-.feed-header__title {
-  font-size: var(--font-size-section);
-  font-weight: 700;
-  color: var(--text-primary);
-  padding-bottom: 12px;
-}
-
-// Tab bar
+// ── Tab bar ─────────────────────────────────────────────────────────────────
 .tab-bar {
   display: flex;
   align-items: stretch;
 }
 
 .tab-bar__tab {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 14px 8px;
-  font-size: var(--font-size-base);
-  font-weight: 400;
-  color: var(--text-muted);
+  flex: 1 1 0;
+  padding: 16px 14px;
+  font-family: var(--font-body);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--ink-3);
   cursor: pointer;
   position: relative;
-  transition: color 0.15s ease, background 0.15s ease;
-  border-radius: 0;
+  transition: color 0.12s, background 0.12s;
   background: transparent;
+  border: none;
+  text-align: center;
 
   &:hover {
-    background: var(--bg-hover);
-    color: var(--text-secondary);
+    color: var(--ink-1);
+    background: rgba(16, 20, 36, 0.03);
   }
 
   &--active {
-    color: var(--text-primary);
-    font-weight: 700;
+    color: var(--ink-0);
+    font-weight: 600;
 
     &::after {
       content: '';
       position: absolute;
       bottom: 0;
-      left: 0;
-      right: 0;
-      height: 4px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 56px;
+      height: 3px;
       background: var(--accent);
       border-radius: 2px 2px 0 0;
     }
   }
 }
 
-// Compose box
+// ── Compose box ─────────────────────────────────────────────────────────────
 .compose-box {
   display: flex;
   gap: 12px;
-  padding: 12px 16px 0;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-elevated);
+  padding: 16px 26px 4px;
+  border-bottom: 1px solid var(--line-2);
+  background: rgba(255, 255, 255, 0.7);
 }
 
 .compose-box__avatar {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
-  background: var(--bg-hover);
+  background: var(--accent-bg);
+  border: 1.5px solid var(--accent-mid);
   flex-shrink: 0;
   overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 14px;
 
-  img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
+  img { width: 100%; height: 100%; object-fit: cover; }
 }
 
 .compose-box__body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
 .compose-box__textarea {
   width: 100%;
-  font-size: 19px;
+  font-family: var(--font-body);
+  font-size: 15px;
   font-weight: 400;
-  color: var(--text-primary);
-  line-height: 1.4;
-  min-height: 56px;
+  letter-spacing: -0.005em;
+  color: var(--ink-0);
+  line-height: 1.55;
+  min-height: 44px;
   padding: 8px 0 4px;
   caret-color: var(--accent);
+  background: transparent;
 
-  &::placeholder {
-    color: var(--text-muted);
-  }
+  &::placeholder { color: var(--ink-4); }
 }
 
 .compose-box__footer {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding: 8px 0 12px;
-  border-top: 1px solid var(--border);
+  padding: 6px 0 12px;
+  border-top: 1px solid var(--line-2);
 }
 
 .compose-box__actions {
@@ -134,95 +127,86 @@
 }
 
 .compose-box__char-counter {
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--ink-4);
   margin-left: auto;
-  padding-right: 8px;
+  padding-right: 10px;
 
-  &--warn {
-    color: #d97706;
-  }
-
-  &--over {
-    color: var(--error);
-    font-weight: 700;
-  }
+  &--warn { color: #b45309; }
+  &--over { color: var(--danger); font-weight: 500; }
 }
 
 .compose-box__action-btn {
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--accent);
-  font-size: 18px;
+  font-size: 16px;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 0.12s;
 
-  &:hover {
-    background: var(--accent-soft);
-  }
+  &:hover { background: var(--accent-bg); }
 }
 
-// Post highlight animation (new post)
-@keyframes post-highlight {
-  0% { background: var(--accent-soft); }
-  100% { background: var(--bg-elevated); }
-}
-
-.post-card--highlight {
-  animation: post-highlight 0.8s ease-out;
-}
-
-// Post cards
-.post-card {
+// ── Post card (list item) ──────────────────────────────────────────────────
+.feed__posts {
   display: flex;
-  gap: 12px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border-strong);
-  border-radius: 0;
-  background: var(--bg-elevated);
+  flex-direction: column;
+}
+
+.post-card {
+  position: relative;
+  display: flex;
+  gap: 14px;
+  padding: 14px 26px 12px;
+  border-bottom: 1px solid var(--line-2);
+  background: transparent;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 0.1s;
+  animation: fadeUp 0.26s ease both;
 
-  // No shadows, no border-radius — flat cards
-  box-shadow: none;
+  &:hover { background: var(--surface-hover); }
+  &:last-child { border-bottom: none; }
 
-  &:hover {
-    background: var(--bg-hover);
-  }
-
-  &:last-child {
-    border-bottom: none;
-  }
+  // Stagger first few entries
+  &:nth-child(1) { animation-delay: 0.04s; }
+  &:nth-child(2) { animation-delay: 0.08s; }
+  &:nth-child(3) { animation-delay: 0.13s; }
+  &:nth-child(4) { animation-delay: 0.18s; }
 }
 
-.post-card__avatar-col {
-  flex-shrink: 0;
+@keyframes post-highlight {
+  0% { background: var(--accent-bg); }
+  100% { background: transparent; }
 }
+
+.post-card--highlight { animation: post-highlight 0.9s ease-out; }
+
+.post-card__avatar-col { flex-shrink: 0; }
 
 .post-card__avatar {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
-  background: var(--bg-hover);
+  background: var(--accent-bg);
+  border: 1.5px solid var(--accent-mid);
   overflow: hidden;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #ffffff;
+  color: var(--accent);
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 400;
   font-size: 14px;
-  font-weight: 700;
 
-  img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
+  img { width: 100%; height: 100%; object-fit: cover; }
 }
 
 .post-card__body {
@@ -233,7 +217,6 @@
   gap: 4px;
 }
 
-// Name row: display name + handle + timestamp
 .post-card__meta {
   display: flex;
   align-items: baseline;
@@ -242,50 +225,54 @@
 }
 
 .post-card__name {
-  font-size: var(--font-size-base);
-  font-weight: 700;
-  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  color: var(--ink-0);
   white-space: nowrap;
 
-  &:hover {
-    text-decoration: underline;
-  }
+  &:hover { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
 }
 
 .post-card__handle {
-  font-size: var(--font-size-base);
-  font-weight: 400;
-  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
   white-space: nowrap;
 }
 
 .post-card__timestamp {
-  font-size: var(--font-size-base);
-  font-weight: 400;
-  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  color: var(--ink-4);
   white-space: nowrap;
 
   &::before {
     content: '·';
     margin-right: 6px;
+    color: var(--ink-4);
   }
 }
 
-// Content
 .post-card__content {
-  font-size: var(--font-size-base);
+  font-family: var(--font-body);
+  font-size: 14px;
   font-weight: 400;
-  color: var(--text-secondary);
-  line-height: 1.4;
+  letter-spacing: -0.005em;
+  color: var(--ink-1);
+  line-height: 1.6;
   word-break: break-word;
+  margin-top: 2px;
 }
 
-// Media (images/videos embedded in posts)
 .post-card__media {
-  margin-top: 8px;
-  border-radius: 12px;
+  margin-top: 10px;
+  border-radius: 9px;
   overflow: hidden;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--line);
 
   img {
     width: 100%;
@@ -294,98 +281,126 @@
   }
 }
 
-// Action bar
+// ── Action bar ──────────────────────────────────────────────────────────────
 .post-card__actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-top: 8px;
-  // Extend slightly beyond normal width for visual balance
-  margin-left: -4px;
-  margin-right: -4px;
+  gap: 18px;
+  margin-top: 10px;
+  margin-left: -2px;
 }
 
 .post-action {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px;
-  border-radius: var(--radius-pill);
-  color: var(--text-muted);
+  gap: 5px;
+  padding: 4px 4px;
+  border-radius: 6px;
+  color: var(--ink-4);
   cursor: pointer;
-  transition: color 0.15s ease;
+  transition: color 0.12s, background 0.12s;
+  background: transparent;
+  border: none;
 
   &:hover {
-    .post-action__icon-wrap {
-      background: var(--action-hover-bg, var(--bg-hover));
-    }
-    color: var(--action-hover-color, var(--text-secondary));
+    color: var(--ink-1);
+    .post-action__icon-wrap { background: rgba(16, 20, 36, 0.04); }
   }
 
-  // Reply / Share: accent color on hover
   &--reply:hover,
   &--share:hover {
     color: var(--accent);
-
-    .post-action__icon-wrap {
-      background: var(--accent-soft);
-    }
+    .post-action__icon-wrap { background: var(--accent-bg); }
   }
 
-  // Repost: success color on hover
   &--repost:hover {
-    color: var(--success);
-
-    .post-action__icon-wrap {
-      background: rgba(51, 153, 102, 0.12);
-    }
+    color: var(--trust);
+    .post-action__icon-wrap { background: var(--trust-bg); }
   }
 
-  // Like: error color on hover
   &--like:hover {
-    color: var(--error);
-
-    .post-action__icon-wrap {
-      background: rgba(220, 38, 38, 0.10);
-    }
+    color: var(--danger);
+    .post-action__icon-wrap { background: rgba(176, 48, 32, 0.10); }
   }
 
-  // Active states
-  &--repost.is-active {
-    color: var(--success);
-  }
-
-  &--like.is-active {
-    color: var(--error);
-  }
+  &--repost.is-active { color: var(--trust); }
+  &--like.is-active   { color: var(--danger); }
 }
 
 .post-action__icon-wrap {
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
-  transition: background 0.15s ease;
+  font-size: 16px;
+  transition: background 0.12s;
 }
 
 .post-action__count {
-  font-size: 13px;
-  font-weight: 400;
-  min-width: 16px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.02em;
+  min-width: 12px;
 }
 
-// Repost context (shows above the post when viewing a repost)
+// Repost context line
 .post-card__repost-context {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-4);
   margin-bottom: 4px;
-  margin-left: -52px; // align with main content column
-  padding-left: 52px;
+  margin-left: -50px;
+  padding-left: 50px;
+}
+
+// ── Network hop trail (for posts that travelled the network) ────────────────
+.hop-trail {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 8px;
+}
+
+.hop-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--trust);
+  opacity: 0.9;
+}
+
+.hop-line {
+  width: 12px;
+  height: 1px;
+  background: var(--trust);
+  opacity: 0.3;
+}
+
+.hop-label {
+  font-family: var(--font-mono);
+  font-size: 7.5px;
+  color: var(--ink-4);
+  letter-spacing: 0.05em;
+  margin-left: 3px;
+  text-transform: uppercase;
+}
+
+// ── Verified / signed badge ─────────────────────────────────────────────────
+.verified-badge {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  color: var(--trust);
+  background: var(--trust-bg);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(51, 153, 102, 0.15);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }

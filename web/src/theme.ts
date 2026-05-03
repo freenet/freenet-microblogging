@@ -1,27 +1,9 @@
-const STORAGE_KEY = "freenet-theme";
-
-function safeGetItem(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function safeSetItem(key: string, value: string): void {
-  try {
-    localStorage.setItem(key, value);
-  } catch {
-    // sandboxed iframe — localStorage not available
-  }
-}
+// Theme is in-memory only: Freenet webapps run in an iframe sandboxed without
+// `allow-same-origin`, so localStorage / sessionStorage / cookies are blocked.
+// On every reload we fall back to the user's OS preference; the toggle holds
+// during the session.
 
 export function initTheme(): void {
-  const stored = safeGetItem(STORAGE_KEY);
-  if (stored === "dark" || stored === "light") {
-    applyTheme(stored);
-    return;
-  }
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   applyTheme(prefersDark ? "dark" : "light");
 }
@@ -34,5 +16,4 @@ export function toggleTheme(): void {
 
 function applyTheme(theme: "dark" | "light"): void {
   document.documentElement.setAttribute("data-theme", theme);
-  safeSetItem(STORAGE_KEY, theme);
 }

@@ -1,180 +1,273 @@
-// Sidebar: logo, nav items, post CTA
+// Sidebar — wordmark, primary CTA, nav, theme toggle, profile, status panel
 
 .sidebar {
   display: flex;
   flex-direction: column;
-  padding: 0 12px;
+  padding: 14px 8px 12px;
 }
 
-// Logo area
+// ── Wordmark ────────────────────────────────────────────────────────────────
 .sidebar-logo {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 16px 12px 8px;
+  padding: 4px 10px 14px;
   text-decoration: none;
+  border-bottom: 1px solid var(--line-2);
+  margin-bottom: 12px;
 
-  &:hover {
-    opacity: 0.85;
-  }
+  &:hover { opacity: 0.9; }
 }
 
-.sidebar-logo__icon {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.sidebar-logo__img {
+  width: 32px;
+  height: 32px;
   flex-shrink: 0;
-  color: #ffffff;
-  font-size: 16px;
-  font-weight: 700;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .sidebar-logo__text {
-  font-size: var(--font-size-logo);
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-// Navigation
-.sidebar-nav {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  margin-top: 8px;
-  flex: 1;
-}
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  color: var(--ink-0);
+  line-height: 1.1;
 
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 12px 16px;
-  border-radius: var(--radius-pill);
-  color: var(--text-secondary);
-  font-size: var(--font-size-nav);
-  font-weight: 400;
-  cursor: pointer;
-  transition: background 0.15s ease;
-  text-decoration: none;
-  white-space: nowrap;
-
-  &:hover {
-    background: var(--bg-hover);
-  }
-
-  &--active {
-    background: var(--accent-soft);
-    color: var(--accent);
-    font-weight: 700;
-
-    .nav-item__icon {
-      color: var(--accent);
-    }
+  &::after {
+    content: 'Decentralized Microblog';
+    font-family: var(--font-mono);
+    font-size: 7.5px;
+    font-weight: 400;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
   }
 }
 
-.nav-item__icon {
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  font-size: 24px;
-  color: var(--text-secondary);
-
-  .nav-item--active & {
-    color: var(--accent);
-  }
-}
-
-.nav-item__label {
-  flex: 1;
-}
-
-// Post CTA button
+// ── Primary CTA (Post / Compose) ────────────────────────────────────────────
 .sidebar-post-btn {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 100%;
-  padding: 14px 20px;
-  margin: 16px 0 24px;
-  border-radius: var(--radius-pill);
-  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
-  color: #ffffff;
-  font-size: var(--font-size-post-btn);
-  font-weight: 700;
+  padding: 9px 14px;
+  margin: 4px 0 16px;
+  border-radius: 9px;
+  background: var(--ink-0);
+  color: var(--surface-0);
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 14px;
+  letter-spacing: -0.01em;
   cursor: pointer;
   border: none;
-  transition: opacity 0.15s ease, transform 0.1s ease;
+  transition: background 0.14s;
   text-align: center;
 
+  &:hover { background: var(--ink-1); }
+  &:active { background: var(--ink-2); }
+}
+
+// ── Section label (mono uppercase) ──────────────────────────────────────────
+.sidebar-section-label {
+  font-family: var(--font-mono);
+  font-size: 7.5px;
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  padding: 9px 12px 5px;
+}
+
+// ── Nav ─────────────────────────────────────────────────────────────────────
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+}
+
+.nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-radius: 7px;
+  color: var(--ink-2);
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  text-decoration: none;
+  white-space: nowrap;
+  background: transparent;
+  border: none;
+  text-align: left;
+  width: 100%;
+
   &:hover {
-    opacity: 0.9;
-    transform: translateY(-1px);
+    background: var(--surface-hover);
+    color: var(--ink-0);
   }
 
-  &:active {
-    opacity: 0.95;
-    transform: translateY(0);
+  &--active {
+    background: var(--surface-active);
+    color: var(--ink-0);
+    font-weight: 500;
+    box-shadow: var(--shadow-sm);
+
+    &::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 22%;
+      bottom: 22%;
+      width: 2px;
+      background: var(--accent);
+      border-radius: 0 2px 2px 0;
+    }
   }
 }
 
-// Profile section at bottom
+.nav-item__icon {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--ink-3);
+
+  svg { width: 18px; height: 18px; }
+
+  .nav-item--active & { color: var(--accent); }
+}
+
+.nav-item__label { flex: 1; }
+
+// ── Profile pod ─────────────────────────────────────────────────────────────
 .sidebar-profile {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
-  margin-bottom: 16px;
-  border-radius: var(--radius-pill);
+  gap: 10px;
+  padding: 8px 12px;
+  margin-top: 8px;
+  border-radius: 8px;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 0.12s;
 
-  &:hover {
-    background: var(--bg-hover);
-  }
+  &:hover { background: var(--surface-hover); }
 }
 
 .sidebar-profile__avatar {
-  width: 40px;
-  height: 40px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
-  background: var(--bg-hover);
+  background: var(--accent-bg);
+  border: 1.5px solid var(--accent-mid);
+  color: var(--accent);
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
   overflow: hidden;
 
-  img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
+  img { width: 100%; height: 100%; object-fit: cover; }
 }
 
 .sidebar-profile__info {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .sidebar-profile__name {
-  font-size: var(--font-size-base);
-  font-weight: 700;
-  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--ink-0);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .sidebar-profile__handle {
-  font-size: var(--font-size-base);
+  font-family: var(--font-mono);
+  font-size: 9px;
   font-weight: 400;
-  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.sidebar-profile__export {
+  margin-top: 4px;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 400;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  align-self: flex-start;
+  transition: color 0.12s;
+
+  &:hover { color: var(--ink-0); }
+}
+
+// ── Status / trust panel (bottom of sidebar) ────────────────────────────────
+.sidebar-status {
+  border-top: 1px solid var(--line-2);
+  padding: 12px 0 4px;
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-status__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+}
+
+.live-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--trust);
+  flex-shrink: 0;
+  animation: pulse 3s ease infinite;
+
+  &--static {
+    background: var(--accent);
+    animation: none;
+  }
 }

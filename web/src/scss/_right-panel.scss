@@ -1,24 +1,32 @@
-// Right panel: search, trending card, who to follow
+// Right panel — info / about / metadata cards
 
 .right-panel {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding-top: 12px;
+  gap: 14px;
+  padding: 18px 0 24px;
 }
 
-// Search box
+// ── Search box ──────────────────────────────────────────────────────────────
 .search-box {
-  position: relative;
+  position: sticky;
+  top: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
+  padding: 6px 0;
+  background: rgba(248, 250, 252, 0.96);
+  backdrop-filter: blur(8px);
+  margin: -6px 0 0;
 }
 
 .search-box__icon {
   position: absolute;
-  left: 14px;
-  font-size: 18px;
-  color: var(--text-muted);
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 14px;
+  color: var(--ink-4);
   pointer-events: none;
   display: flex;
   align-items: center;
@@ -26,23 +34,23 @@
 
 .search-box__input {
   width: 100%;
-  height: 44px;
-  padding: 0 16px 0 44px;
-  border-radius: var(--radius-pill);
-  background: var(--bg-hover);
-  color: var(--text-primary);
-  font-size: var(--font-size-base);
+  height: 32px;
+  padding: 0 12px 0 32px;
+  border-radius: 8px;
+  background: rgba(239, 246, 255, 0.8);
+  color: var(--ink-0);
+  font-family: var(--font-body);
+  font-size: 12.5px;
   font-weight: 400;
-  border: 1px solid transparent;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  letter-spacing: -0.005em;
+  border: 1px solid var(--line);
+  transition: border-color 0.18s, background 0.18s;
 
-  &::placeholder {
-    color: var(--text-muted);
-  }
+  &::placeholder { color: var(--ink-4); }
 
   &:focus {
-    background: var(--bg-elevated);
-    border-color: var(--accent);
+    background: rgba(255, 255, 255, 0.95);
+    border-color: var(--accent-mid);
     outline: none;
 
     & + .search-box__icon,
@@ -52,92 +60,111 @@
   }
 }
 
-// Trending & Who-to-Follow cards share a common container
+// ── Panel cards ─────────────────────────────────────────────────────────────
 .panel-card {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-strong);
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--line);
   border-radius: var(--radius-card);
   overflow: hidden;
+  box-shadow: var(--shadow-sm);
 }
 
 .panel-card__header {
-  padding: 16px 16px 12px;
-  border-bottom: 1px solid var(--border);
+  padding: 13px 16px 10px;
+  border-bottom: 1px solid var(--line-2);
 }
 
 .panel-card__title {
-  font-size: var(--font-size-section);
-  font-weight: 700;
-  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 400;
+  letter-spacing: -0.035em;
+  color: var(--ink-0);
+  line-height: 1.2;
 }
 
-// Trending items
+.panel-card__subtitle {
+  font-family: var(--font-mono);
+  font-size: 7.5px;
+  font-weight: 400;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  margin-top: 4px;
+}
+
+// ── Trending ────────────────────────────────────────────────────────────────
 .trending-item {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 12px 16px;
+  padding: 10px 16px;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 0.12s;
 
-  &:hover {
-    background: var(--bg-hover);
-  }
+  &:hover { background: var(--surface-hover); }
 
   &:not(:last-child) {
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--line-2);
   }
 }
 
 .trending-item__category {
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-4);
 }
 
 .trending-item__topic {
-  font-size: var(--font-size-base);
-  font-weight: 700;
-  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  color: var(--ink-0);
 }
 
 .trending-item__count {
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
 }
 
-// Who to follow items
+// ── Who to follow ──────────────────────────────────────────────────────────
 .follow-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 16px;
+  padding: 10px 16px;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 0.12s;
 
-  &:hover {
-    background: var(--bg-hover);
-  }
+  &:hover { background: var(--surface-hover); }
 
   &:not(:last-child) {
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--line-2);
   }
 }
 
 .follow-item__avatar {
-  width: 40px;
-  height: 40px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
-  background: var(--bg-hover);
+  background: var(--accent-bg);
+  border: 1.5px solid var(--accent-mid);
   flex-shrink: 0;
   overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 13px;
 
-  img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
+  img { width: 100%; height: 100%; object-fit: cover; }
 }
 
 .follow-item__info {
@@ -146,58 +173,78 @@
 }
 
 .follow-item__name {
-  font-size: var(--font-size-base);
-  font-weight: 700;
-  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  color: var(--ink-0);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-
-  &:hover {
-    text-decoration: underline;
-  }
 }
 
 .follow-item__handle {
-  font-size: var(--font-size-base);
-  font-weight: 400;
-  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-// "Show more" link at bottom of cards
+// ── More link ──────────────────────────────────────────────────────────────
 .panel-card__more {
   display: block;
-  padding: 14px 16px;
-  font-size: var(--font-size-base);
+  padding: 11px 16px;
+  font-family: var(--font-mono);
+  font-size: 9px;
   font-weight: 400;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   color: var(--accent);
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 0.12s;
 
-  &:hover {
-    background: var(--bg-hover);
-    text-decoration: none;
-  }
+  &:hover { background: var(--surface-hover); }
 }
 
-// Footer links
-.right-panel-footer {
-  padding: 0 4px;
+// ── Information strip (metadata pill) ──────────────────────────────────────
+.info-strip {
+  padding: 9px 13px;
+  background: rgba(239, 246, 255, 0.8);
+  border: 1px solid var(--line);
+  border-radius: 9px;
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
 }
 
-.right-panel-footer__link {
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--text-muted);
-  cursor: pointer;
+.info-strip__label {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  flex-shrink: 0;
+}
 
-  &:hover {
-    text-decoration: underline;
-  }
+.info-strip__content {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-3);
+}
+
+.info-strip__badge {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  color: var(--trust);
+  background: var(--trust-bg);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(51, 153, 102, 0.15);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex-shrink: 0;
 }

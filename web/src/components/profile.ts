@@ -1,9 +1,5 @@
 /**
  * profile.ts — User profile page component
- *
- * Displays a user's avatar, display name, handle, public key, post count,
- * and a list of their posts. Uses CSS custom properties from the design system
- * with inline styles. Styles are injected once via a <style> tag.
  */
 
 import { Post, User } from "../types";
@@ -39,11 +35,10 @@ export function createProfile(user: User, posts: Post[]): HTMLElement {
 
   header.appendChild(headerTitle);
 
-  // ---- Hero section ----
+  // ---- Hero ----
   const hero = document.createElement("div");
   hero.className = "profile-hero";
 
-  // Large avatar (80px circle with initials + color)
   const avatar = document.createElement("div");
   avatar.className = "profile-avatar";
   avatar.textContent = getInitials(user.displayName);
@@ -51,7 +46,6 @@ export function createProfile(user: User, posts: Post[]): HTMLElement {
     avatar.style.background = user.avatarColor;
   }
 
-  // User info block
   const info = document.createElement("div");
   info.className = "profile-info";
 
@@ -66,16 +60,18 @@ export function createProfile(user: User, posts: Post[]): HTMLElement {
   info.appendChild(displayNameEl);
   info.appendChild(handleEl);
 
-  // Public key (shown only if present)
   if (user.publicKey) {
-    const keyEl = document.createElement("div");
-    keyEl.className = "profile-info__pubkey";
-    keyEl.title = user.publicKey; // full key on hover
-    keyEl.textContent = truncateKey(user.publicKey);
-    info.appendChild(keyEl);
+    const keyStrip = document.createElement("div");
+    keyStrip.className = "profile-info__keystrip";
+    keyStrip.title = user.publicKey;
+    keyStrip.innerHTML = `
+      <span class="profile-info__keystrip-label">Public key</span>
+      <span class="profile-info__keystrip-value">${truncateKey(user.publicKey)}</span>
+      <span class="verified-badge">✓ verified</span>
+    `;
+    info.appendChild(keyStrip);
   }
 
-  // Post count stat
   const stats = document.createElement("div");
   stats.className = "profile-stats";
 
@@ -88,10 +84,6 @@ export function createProfile(user: User, posts: Post[]): HTMLElement {
   hero.appendChild(avatar);
   hero.appendChild(info);
   hero.appendChild(stats);
-
-  // ---- Divider ----
-  const divider = document.createElement("div");
-  divider.className = "profile-divider";
 
   // ---- Posts section ----
   const postsSection = document.createElement("div");
@@ -106,7 +98,10 @@ export function createProfile(user: User, posts: Post[]): HTMLElement {
   if (posts.length === 0) {
     const empty = document.createElement("div");
     empty.className = "profile-posts__empty";
-    empty.textContent = "No posts yet.";
+    empty.innerHTML = `
+      <span class="profile-posts__empty-glyph">"</span>
+      <span class="profile-posts__empty-text">Nothing posted yet</span>
+    `;
     postsSection.appendChild(empty);
   } else {
     for (const post of posts) {
@@ -116,7 +111,6 @@ export function createProfile(user: User, posts: Post[]): HTMLElement {
 
   profile.appendChild(header);
   profile.appendChild(hero);
-  profile.appendChild(divider);
   profile.appendChild(postsSection);
 
   return profile;
@@ -133,80 +127,116 @@ function injectStyles(): void {
     .profile-page {
       flex: 1;
       min-width: 0;
-      border-right: 1px solid var(--border-strong);
       min-height: 100vh;
-      font-family: var(--font-stack, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+      background: rgba(255, 255, 255, 0.55);
     }
 
     .profile-header {
       position: sticky;
       top: 0;
       z-index: 10;
-      background: var(--bg-primary);
-      border-bottom: 1px solid var(--border-strong);
-      padding: 12px 16px;
+      background: rgba(248, 250, 252, 0.96);
+      border-bottom: 1px solid var(--line);
+      padding: 18px 26px;
     }
 
     .profile-header__title {
-      font-size: 18px;
-      font-weight: 700;
-      color: var(--text-primary);
+      font-family: var(--font-display);
+      font-size: 22px;
+      font-weight: 400;
+      letter-spacing: -0.04em;
+      color: var(--ink-0);
+      line-height: 1.15;
     }
 
     .profile-hero {
       display: flex;
       flex-direction: column;
       align-items: flex-start;
-      gap: 12px;
-      padding: 24px 20px 20px;
+      gap: 14px;
+      padding: 26px 26px 22px;
+      border-bottom: 1px solid var(--line-2);
     }
 
     .profile-avatar {
-      width: 80px;
-      height: 80px;
+      width: 72px;
+      height: 72px;
       border-radius: 50%;
-      background: var(--accent, #0066cc);
-      color: #ffffff;
+      background: var(--accent-bg);
+      border: 1.5px solid var(--accent-mid);
+      color: var(--accent);
+      font-family: var(--font-display);
+      font-style: italic;
+      font-weight: 400;
       font-size: 28px;
-      font-weight: 700;
       display: flex;
       align-items: center;
       justify-content: center;
       flex-shrink: 0;
-      border: 3px solid var(--bg-primary);
-      box-shadow: 0 0 0 2px var(--border-strong);
+      box-shadow: var(--shadow-sm);
     }
 
     .profile-info {
       display: flex;
       flex-direction: column;
-      gap: 2px;
+      gap: 4px;
     }
 
     .profile-info__name {
-      font-size: 20px;
-      font-weight: 700;
-      color: var(--text-primary);
-      line-height: 1.3;
+      font-family: var(--font-display);
+      font-size: 22px;
+      font-weight: 400;
+      letter-spacing: -0.04em;
+      color: var(--ink-0);
+      line-height: 1.2;
     }
 
     .profile-info__handle {
-      font-size: 15px;
-      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.02em;
+      color: var(--ink-3);
     }
 
-    .profile-info__pubkey {
-      font-family: "SF Mono", "Fira Mono", "Cascadia Mono", Consolas, monospace;
-      font-size: 11px;
-      color: var(--text-muted);
-      background: var(--bg-elevated, rgba(0,0,0,0.04));
-      border-radius: 4px;
-      padding: 2px 6px;
-      margin-top: 4px;
-      display: inline-block;
-      cursor: default;
+    .profile-info__keystrip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+      padding: 6px 10px;
+      background: rgba(239, 246, 255, 0.8);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      max-width: 100%;
+      flex-wrap: wrap;
+    }
+
+    .profile-info__keystrip-label {
+      font-family: var(--font-mono);
+      font-size: 8px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--ink-4);
+    }
+
+    .profile-info__keystrip-value {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.02em;
+      color: var(--ink-2);
       user-select: all;
-      letter-spacing: 0.03em;
+    }
+
+    .verified-badge {
+      font-family: var(--font-mono);
+      font-size: 8px;
+      color: var(--trust);
+      background: var(--trust-bg);
+      padding: 2px 8px;
+      border-radius: 4px;
+      border: 1px solid rgba(51, 153, 102, 0.15);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
     }
 
     .profile-stats {
@@ -216,35 +246,58 @@ function injectStyles(): void {
     }
 
     .profile-stats__item {
-      font-size: 14px;
-      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--ink-4);
     }
 
     .profile-stats__item strong {
-      color: var(--text-primary);
-      font-weight: 600;
-      margin-right: 3px;
-    }
-
-    .profile-divider {
-      height: 1px;
-      background: var(--border-strong);
-      margin: 0;
+      color: var(--ink-0);
+      font-family: var(--font-display);
+      font-style: normal;
+      font-weight: 500;
+      font-size: 13px;
+      letter-spacing: -0.025em;
+      margin-right: 4px;
+      text-transform: none;
     }
 
     .profile-posts__title {
-      font-size: 15px;
-      font-weight: 700;
-      color: var(--text-primary);
-      padding: 14px 20px 10px;
-      border-bottom: 1px solid var(--border-strong);
+      font-family: var(--font-mono);
+      font-size: 7.5px;
+      font-weight: 400;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-4);
+      padding: 16px 26px 8px;
     }
 
     .profile-posts__empty {
-      padding: 32px 20px;
-      color: var(--text-muted);
-      font-size: 15px;
-      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      padding: 48px 20px;
+    }
+
+    .profile-posts__empty-glyph {
+      font-family: var(--font-display);
+      font-style: italic;
+      font-weight: 300;
+      font-size: 60px;
+      color: var(--surface-3);
+      line-height: 1;
+      letter-spacing: -0.05em;
+    }
+
+    .profile-posts__empty-text {
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ink-4);
     }
   `;
   document.head.appendChild(style);

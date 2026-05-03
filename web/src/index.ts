@@ -1,5 +1,6 @@
 import "./scss/styles.scss";
-import { APP_NAME } from "./branding";
+import { APP_NAME, APP_LOGO_URL } from "./branding";
+import { initTheme } from "./theme";
 import { createApp } from "./app";
 import { FreenetConnection } from "./freenet-api";
 import { Post } from "./types";
@@ -10,13 +11,22 @@ import {
   applyDelegateIdentity,
   connectDelegate,
   requestIdentityFromDelegate,
+  onIdentityExported,
   Identity,
 } from "./identity";
+import { showKeyExportModal } from "./components/key-export-modal";
 import { parseDelegateResponse } from "./delegate-api";
 import { DelegateResponse } from "@freenetorg/freenet-stdlib";
 import { MOCK_POSTS } from "./mock-data";
 
 document.title = APP_NAME;
+
+// Apply persisted theme synchronously, BEFORE any render — avoids FOUC and
+// guarantees onboarding/splash also respect saved preference.
+initTheme();
+
+// Show secret key in modal whenever delegate replies to ExportIdentity.
+onIdentityExported((secretKey) => showKeyExportModal(secretKey));
 
 const appRoot = document.getElementById("app")!;
 
@@ -78,11 +88,14 @@ function showSplash(): void {
   const splash = document.createElement("div");
   splash.className = "splash-screen";
   splash.style.cssText =
-    "display:flex;align-items:center;justify-content:center;height:100vh;background:var(--bg-primary);";
+    "display:flex;align-items:center;justify-content:center;height:100vh;";
   splash.innerHTML = `
-    <div style="text-align:center">
-      <div style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent-hover));margin:0 auto 16px;display:flex;align-items:center;justify-content:center;color:white;font-size:28px;font-weight:700">F</div>
-      <p style="color:var(--text-muted);font-size:15px">Connecting to Freenet...</p>
+    <div style="text-align:center;display:flex;flex-direction:column;align-items:center;gap:16px">
+      <img src="${APP_LOGO_URL}" alt="${APP_NAME} logo" draggable="false" style="width:72px;height:72px;object-fit:contain;user-select:none">
+      <div style="display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:9.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-3)">
+        <span class="live-dot"></span>
+        <span>Connecting to Freenet</span>
+      </div>
     </div>
   `;
   appRoot.appendChild(splash);
