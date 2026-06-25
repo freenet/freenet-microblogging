@@ -64,6 +64,12 @@ export const showOnboarding = writable<boolean>(false);
  * clears to null on close. Replaces the imperative showKeyExportModal() call.
  */
 export const keyExportSecret = writable<string | null>(null);
+/**
+ * Authoritative replies for each thread, keyed by root post id. Written by
+ * the onRepliesUpdated callback whenever a thread shard is read. Thread.svelte
+ * derives its reply list from this store (not from the feed posts list).
+ */
+export const threadReplies = writable<Map<string, Post[]>>(new Map());
 
 // ---------------------------------------------------------------------------
 // Module-private latches / dedup sets (plain `let`/`const`, NOT stores) —
@@ -222,6 +228,13 @@ export const connection = new FreenetConnection({
       return [...cur];
     });
   },
+  onRepliesUpdated: (rootPostId: string, replies: Post[]) => {
+    threadReplies.update((cur) => {
+      const next = new Map(cur);
+      next.set(rootPostId, replies);
+      return next;
+    });
+  },
   onDelegateResponse: (response: DelegateResponse) => {
     const payloads = parseDelegateResponse(response);
     for (const payload of payloads) {
@@ -238,7 +251,9 @@ export const connection = new FreenetConnection({
         return;
       }
 
-      // A signed post came back from the delegate — finish publishing it.
+      // A signed post (or reply) came back from the delegate. Try completeReply
+      // first (matches by nonce against pendingReplies); if it returns false the
+      // nonce belongs to a regular publish — route there instead.
       const signed = payload as {
         type?: string;
         nonce?: string;
@@ -247,20 +262,33 @@ export const connection = new FreenetConnection({
         public_key?: string;
       };
       if (
-        signed.type === "Signed" &&
+        (signed.type === "Signed" || signed.type === "SignedReply") &&
         signed.nonce &&
         signed.post_id &&
         signed.signature &&
         signed.public_key
       ) {
         connection
-          .completePublish({
+          .completeReply({
             nonce: signed.nonce,
             post_id: signed.post_id,
             signature: signed.signature,
             public_key: signed.public_key,
           })
-          .catch((e) => console.error("[delegate] completePublish failed:", e));
+          .then((handled) => {
+            if (!handled) {
+              // Not a reply — route to the regular publish path.
+              connection
+                .completePublish({
+                  nonce: signed.nonce!,
+                  post_id: signed.post_id!,
+                  signature: signed.signature!,
+                  public_key: signed.public_key!,
+                })
+                .catch((e) => console.error("[delegate] completePublish failed:", e));
+            }
+          })
+          .catch((e) => console.error("[delegate] completeReply failed:", e));
         return;
       }
 
@@ -375,6 +403,7 @@ export const connection = new FreenetConnection({
           if (connection.dropPendingLike(p.nonce)) refreshFeed();
           if (connection.dropPendingRepost(p.nonce)) refreshFeed();
           connection.dropPendingQuoteRef(p.nonce);
+          connection.dropPendingReply(p.nonce);
         }
         if (p.message?.includes("no identity")) {
           console.log("[identity] No identity in delegate — show onboarding");
@@ -476,6 +505,26 @@ export function quote(postId: string, content: string): void {
       setTimeout(() => connection.loadState(), 300);
     }
   });
+}
+
+export function reply(rootPostId: string, content: string): void {
+  connection.replyPost(rootPostId, content).then((ok) => {
+    if (!ok) {
+      console.warn("[freenet] Reply not sent (no delegate / shard)");
+    }
+    // On success the reply surfaces via completeReply → thread-shard refresh →
+    // onRepliesUpdated (the threadReplies store), not via a user-shard reload —
+    // the reply lives in the thread shard, so loadState() would be a no-op here.
+  });
+}
+
+/**
+ * Trigger a thread-shard load for the given root post so the reply list is
+ * populated even on a fresh page load (before any engagement action). Mirrors
+ * the like/repost pattern: fire-and-forget, errors are logged in the connection.
+ */
+export function loadThreadReplies(rootPostId: string): void {
+  connection.loadThreadReplies(rootPostId);
 }
 
 // ---------------------------------------------------------------------------

@@ -173,6 +173,36 @@ export function signQuoteRef(
   return true;
 }
 
+/**
+ * Ask the delegate to sign a reply post. Structurally identical to a regular
+ * post but the `reply_to` field is populated (the content-address of the root
+ * post being replied to). The delegate sends a `SignReply` request and replies
+ * with a `SignedReply` response routed through onDelegateResponse →
+ * freenet-api completeReply. Returns false if no delegate (cannot sign offline).
+ */
+export function signReply(
+  nonce: string,
+  content: string,
+  authorName: string,
+  authorHandle: string,
+  timestamp: number,
+  replyTo: string,
+  quotedPost = ""
+): boolean {
+  if (!isDelegateConnected()) return false;
+  sendIdentityMessage(delegateApi!, delegateKeyBytes!, delegateCodeHashBytes!, {
+    type: "SignReply",
+    nonce,
+    content,
+    author_name: authorName,
+    author_handle: authorHandle,
+    timestamp,
+    reply_to: replyTo,
+    quoted_post: quotedPost,
+  }).catch((e) => console.warn("[identity] SignReply failed:", e));
+  return true;
+}
+
 export function exportIdentity(): void {
   if (!isDelegateConnected()) {
     // Offline / no delegate: synthesize a placeholder so the modal still appears

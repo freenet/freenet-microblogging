@@ -12,6 +12,8 @@ export interface Post {
   quotes?: number;
   /** Content address of the post this one quotes, if it is a quote repost. */
   quotedPostId?: string;
+  /** Content address of the post this one replies to (maps to contract reply_to). */
+  replyToId?: string;
 }
 
 export interface User {

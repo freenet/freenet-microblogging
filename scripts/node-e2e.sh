@@ -108,4 +108,7 @@ echo "── running node-e2e Playwright specs ──"
 cd "$ROOT/web/tests"
 proj_args=()
 [ -n "${PLAYWRIGHT_PROJECT:-}" ] && proj_args=(--project="$PLAYWRIGHT_PROJECT")
-BASE_URL="$APP_URL" npx playwright test --config=playwright.node.config.ts "${proj_args[@]}"
+# PLAYWRIGHT_GREP limits to specs/titles matching a substring (default: all).
+grep_args=()
+[ -n "${PLAYWRIGHT_GREP:-}" ] && grep_args=(--grep="$PLAYWRIGHT_GREP")
+BASE_URL="$APP_URL" npx playwright test --config=playwright.node.config.ts "${proj_args[@]}" "${grep_args[@]}"
