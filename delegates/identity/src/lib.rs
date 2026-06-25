@@ -72,6 +72,28 @@ enum Request {
         root_post_id: String,
         quote_post_id: String,
     },
+    /// Sign a reply post for a thread. The delegate builds a canonical [`Post`]
+    /// with `reply_to` populated (binding the reply to its parent thread root),
+    /// derives the content-addressed id, and signs the payload. `reply_to` is
+    /// the content-addressed id of the root post (the thread shard key);
+    /// `quoted_post` is the content-addressed id of an additionally quoted post
+    /// (empty for a plain reply). `nonce` is echoed so the UI can match the
+    /// response to its pending draft. SignPost is kept byte-identical (empty
+    /// `reply_to`) so existing top-level post signatures are unaffected.
+    SignReply {
+        nonce: String,
+        content: String,
+        author_name: String,
+        author_handle: String,
+        timestamp: u64,
+        /// Content-addressed id of the root post this is a reply to (required,
+        /// non-empty — the contract's `reply_is_acceptable` rejects empty).
+        reply_to: String,
+        /// Content-addressed id of the quoted post, if this reply also quotes
+        /// another post; empty/absent for a plain reply.
+        #[serde(default)]
+        quoted_post: String,
+    },
     /// Export the secret seed for backup/migration.
     ExportIdentity,
     /// Import a secret seed + identity from another device.
@@ -127,6 +149,18 @@ enum Response {
         signer_pubkey: String, // hex-encoded VK
         quote_post_id: String,
         signature: String, // hex-encoded ML-DSA-65 signature
+    },
+    /// A signed reply [`Post`] ready to submit to the user shard (and the
+    /// thread shard via `ThreadDelta::Replies`). `nonce` is echoed; `post_id`,
+    /// `signature`, and `public_key` mirror the `Signed` response so the UI
+    /// can assemble and PUT the post without special-casing. Kept as a
+    /// distinct variant (rather than reusing `Signed`) so the UI can
+    /// distinguish a reply response from a top-level post response.
+    SignedReply {
+        nonce: String,      // echoed so the UI can match its pending draft
+        post_id: String,    // content-addressed id = blake3(signing payload)
+        signature: String,  // hex-encoded ML-DSA-65 signature (3309 bytes)
+        public_key: String, // hex-encoded VK
     },
     ExportedIdentity {
         secret_key: String, // hex-encoded 32-byte secret seed
@@ -203,6 +237,45 @@ fn build_signed_post(
         // A quote repost carries the quoted post's content address here; empty
         // for an ordinary post, keeping the signing payload byte-identical to the
         // pre-quoted_post shape.
+        quoted_post: quoted_post.to_string(),
+        signature: None,
+    };
+    post.id = post.compute_id();
+    let signature: ml_dsa::Signature<MlDsa65> = signing_key.sign(&post.signing_payload());
+    post.signature = Some(hex::encode(signature.encode()));
+    post
+}
+
+/// Assemble the canonical reply [`Post`] and sign it with `signing_key`.
+///
+/// Mirrors [`build_signed_post`] but populates `reply_to` (and optionally
+/// `quoted_post`) so the signing payload binds the thread root. The reply
+/// is structurally identical to a post — it lives on the user shard — but
+/// `reply_to` being non-empty means `Post::signing_payload` appends it,
+/// making the id/signature different from a same-content top-level post.
+/// This keeps `SignPost` byte-identical (empty `reply_to`).
+/// Pure (no `ctx` / secret store) so it is unit-testable on the host target.
+fn build_signed_reply(
+    signing_key: &MlDsaSigningKey<MlDsa65>,
+    content: &str,
+    author_name: &str,
+    author_handle: &str,
+    timestamp: u64,
+    reply_to: &str,
+    quoted_post: &str,
+) -> Post {
+    let public_key = vk_hex(signing_key);
+    let mut post = Post {
+        id: String::new(),
+        author_pubkey: public_key,
+        author_name: author_name.to_string(),
+        author_handle: author_handle.to_string(),
+        content: content.to_string(),
+        timestamp,
+        // Non-empty reply_to: mixed into the signing payload so this reply is
+        // thread-bound and cannot be retargeted to a different root.
+        reply_to: reply_to.to_string(),
+        // Optional: non-empty when this reply also quotes another post.
         quoted_post: quoted_post.to_string(),
         signature: None,
     };
@@ -341,6 +414,24 @@ impl DelegateInterface for IdentityDelegate {
                         root_post_id,
                         quote_post_id,
                     } => sign_quote_ref(ctx, &nonce, &root_post_id, &quote_post_id),
+                    Request::SignReply {
+                        nonce,
+                        content,
+                        author_name,
+                        author_handle,
+                        timestamp,
+                        reply_to,
+                        quoted_post,
+                    } => sign_reply(
+                        ctx,
+                        &nonce,
+                        &content,
+                        &author_name,
+                        &author_handle,
+                        timestamp,
+                        &reply_to,
+                        &quoted_post,
+                    ),
                     Request::ExportIdentity => export_identity(ctx),
                     Request::ImportIdentity {
                         secret_key,
@@ -563,6 +654,52 @@ fn sign_quote_ref(
         signer_pubkey: record.signer_pubkey,
         quote_post_id: quote_post_id.to_string(),
         signature,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sign_reply(
+    ctx: &DelegateCtx,
+    nonce: &str,
+    content: &str,
+    author_name: &str,
+    author_handle: &str,
+    timestamp: u64,
+    reply_to: &str,
+    quoted_post: &str,
+) -> Response {
+    let signing_key = match load_signing_key(ctx) {
+        Ok(k) => k,
+        // Re-tag the load error with this request's nonce so the UI can drop
+        // exactly the stranded pending draft.
+        Err(Response::Error { message, .. }) => {
+            return Response::Error {
+                message,
+                nonce: Some(nonce.to_string()),
+            };
+        }
+        Err(resp) => return resp,
+    };
+
+    // Build + sign the canonical reply with the single trusted encoder
+    // (`common::post`) — the exact bytes the user-shard contract verifies.
+    // reply_to (non-empty) is mixed into the signing payload via
+    // `Post::signing_payload`, binding this reply to its thread root.
+    let post = build_signed_reply(
+        &signing_key,
+        content,
+        author_name,
+        author_handle,
+        timestamp,
+        reply_to,
+        quoted_post,
+    );
+
+    Response::SignedReply {
+        nonce: nonce.to_string(),
+        post_id: post.id,
+        signature: post.signature.unwrap_or_default(),
+        public_key: post.author_pubkey,
     }
 }
 
@@ -965,5 +1102,136 @@ mod test {
         // Distinct domain tags (raven:post:v1 vs raven:thread-like:v1) guarantee
         // the byte payloads differ.
         assert_ne!(post.signing_payload(), like.signing_payload("root"));
+    }
+
+    // -- SignReply tests --
+
+    // R1. build_signed_reply output verifies under Post::verify() — the same
+    //     code path the user-shard contract runs. Confirms reply_to is present
+    //     and the signing payload / id are consistent with what the verifier
+    //     expects.
+    #[test]
+    fn signed_reply_verifies_under_common() {
+        let sk = signing_key_from_seed(&SEED_A);
+        let reply = build_signed_reply(
+            &sk,
+            "nice post",
+            "Bob",
+            "@bob",
+            1_700_000_000_001,
+            "root_post_id_aaaaaa",
+            "",
+        );
+
+        assert_eq!(reply.verify(), Ok(()));
+        assert_eq!(reply.author_pubkey, vk_hex(&sk));
+        assert_eq!(reply.reply_to, "root_post_id_aaaaaa");
+        assert!(reply.quoted_post.is_empty());
+        assert!(reply.id_is_valid());
+        assert!(reply.signature.is_some());
+    }
+
+    // R2. A reply signed for root A fails verification when reply_to is swapped
+    //     to root B (rebinding guard). Changing reply_to changes the signing
+    //     payload, so the id no longer matches — a misfiled reply is detectable.
+    #[test]
+    fn signed_reply_rebinding_breaks_verification() {
+        let sk = signing_key_from_seed(&SEED_A);
+        let reply = build_signed_reply(
+            &sk,
+            "nice post",
+            "Bob",
+            "@bob",
+            1_700_000_000_001,
+            "root_post_id_aaaaaa",
+            "",
+        );
+        assert_eq!(reply.verify(), Ok(()));
+
+        // Swap reply_to to a different root — id should no longer match.
+        let mut moved = reply.clone();
+        moved.reply_to = "root_post_id_bbbbbb".into();
+        // id is over the payload which includes reply_to, so id mismatch fires
+        // before the signature check.
+        assert_eq!(moved.verify(), Err(PostVerifyError::IdMismatch));
+
+        // Fix up the id but keep the original signature — now the signature
+        // must fail (the bytes that were signed no longer match).
+        moved.id = moved.compute_id();
+        assert_eq!(moved.verify(), Err(PostVerifyError::SignatureInvalid));
+    }
+
+    // R3a. A reply+quote (both reply_to and quoted_post non-empty) produces the
+    //      correct byte order in the signing payload: reply_to is appended first,
+    //      then quoted_post (as specified by Post::signing_payload). Verify both
+    //      that the assembled post verifies and that the payload bytes match the
+    //      hand-constructed expected order.
+    #[test]
+    fn signed_reply_and_quote_payload_byte_order() {
+        let sk = signing_key_from_seed(&SEED_A);
+        let reply = build_signed_reply(
+            &sk,
+            "great and also replying",
+            "Alice",
+            "@alice",
+            1_700_000_000_002,
+            "reply_root_id",
+            "quoted_post_id",
+        );
+
+        // Full verification passes.
+        assert_eq!(reply.verify(), Ok(()));
+        assert_eq!(reply.reply_to, "reply_root_id");
+        assert_eq!(reply.quoted_post, "quoted_post_id");
+
+        // Manually reconstruct the expected payload to pin the field order:
+        // domain tag, author_pubkey, author_name, author_handle, content,
+        // timestamp (LE u64), reply_to (non-empty → appended), quoted_post
+        // (non-empty → appended after reply_to). Use the same length-prefix
+        // encoding Post::signing_payload uses.
+        fn put(buf: &mut Vec<u8>, field: &[u8]) {
+            buf.extend_from_slice(&(field.len() as u32).to_le_bytes());
+            buf.extend_from_slice(field);
+        }
+        let mut expected = Vec::new();
+        put(
+            &mut expected,
+            freenet_microblogging_common::post::POST_DOMAIN_TAG,
+        );
+        put(&mut expected, reply.author_pubkey.as_bytes());
+        put(&mut expected, b"Alice");
+        put(&mut expected, b"@alice");
+        put(&mut expected, b"great and also replying");
+        put(&mut expected, &1_700_000_000_002u64.to_le_bytes());
+        put(&mut expected, b"reply_root_id"); // reply_to first
+        put(&mut expected, b"quoted_post_id"); // quoted_post second
+
+        assert_eq!(reply.signing_payload(), expected);
+    }
+
+    // R3b. SignPost path is byte-identical: a post built with build_signed_post
+    //      (empty reply_to) and a reply built with build_signed_reply for the
+    //      same content have DIFFERENT signing payloads (reply_to being non-empty
+    //      extends the payload). Ensures the two paths do not collide.
+    #[test]
+    fn top_level_post_and_reply_have_different_payloads() {
+        let sk = signing_key_from_seed(&SEED_A);
+        let top_post = build_signed_post(&sk, "same content", "Alice", "@alice", 1_000, "");
+        let reply = build_signed_reply(
+            &sk,
+            "same content",
+            "Alice",
+            "@alice",
+            1_000,
+            "some_root_id",
+            "",
+        );
+
+        // Different payloads → different ids and different signatures.
+        assert_ne!(top_post.signing_payload(), reply.signing_payload());
+        assert_ne!(top_post.id, reply.id);
+        // Both still verify independently.
+        assert_eq!(top_post.verify(), Ok(()));
+        assert_eq!(reply.verify(), Ok(()));
     }
 }

@@ -36,7 +36,7 @@ import {
   shardContractKeyTFromParts,
   hexToBytes,
 } from "./shard-key";
-import { signPost, signLike, signRepost, signQuoteRef } from "./identity";
+import { signPost, signLike, signRepost, signQuoteRef, signReply } from "./identity";
 
 /**
  * Assemble the `PutRequest` that instantiates a parameterized shard contract.
@@ -208,6 +208,16 @@ interface PendingQuoteRef {
   quotePostId: string;
 }
 
+/** A pending reply awaiting the delegate's `Signed` response, keyed by nonce. */
+interface PendingReply {
+  nonce: string;
+  rootPostId: string;
+  author_name: string;
+  author_handle: string;
+  content: string;
+  timestamp: number;
+}
+
 /** Aggregate quote state for one post, derived from its thread shard. */
 export interface QuoteState {
   postId: string;
@@ -233,6 +243,7 @@ function contractPostToUiPost(cp: ContractPost): Post {
     reposted: false,
     quotes: 0,
     quotedPostId: cp.quoted_post && cp.quoted_post.length > 0 ? cp.quoted_post : undefined,
+    replyToId: cp.reply_to && cp.reply_to.length > 0 ? cp.reply_to : undefined,
   };
 }
 
@@ -268,6 +279,13 @@ export interface FreenetCallbacks {
   onGlobalPostsLoaded?: (posts: Post[]) => void;
   /** Optional: a single live public-timeline post from a global-index delta. */
   onNewGlobalPost?: (post: Post) => void;
+  /**
+   * Optional: authoritative reply list for a root post, derived from its
+   * thread shard GET. Fires whenever the thread shard is read (like/repost
+   * refresh or explicit subscribe delivery). The full reply set is passed so
+   * the caller can replace (not merge) its local replica.
+   */
+  onRepliesUpdated?: (rootPostId: string, replies: Post[]) => void;
 }
 
 export class FreenetConnection {
@@ -347,6 +365,8 @@ export class FreenetConnection {
   private pendingReposts: PendingRepost[] = [];
   /** Quote-refs awaiting a delegate `SignedQuoteRef`, keyed by nonce. */
   private pendingQuoteRefs: PendingQuoteRef[] = [];
+  /** Replies awaiting a delegate `Signed` response (SignReply), keyed by nonce. */
+  private pendingReplies: PendingReply[] = [];
 
   constructor(callbacks: FreenetCallbacks) {
     this.callbacks = callbacks;
@@ -480,6 +500,10 @@ export class FreenetConnection {
         this.emitLikeState(threadRoot, thread.likes ?? {});
         this.emitRepostState(threadRoot, thread.reposts ?? {});
         this.emitQuoteState(threadRoot, thread.quotes ?? {});
+        // Emit the full reply list so Thread.svelte can surface real replies.
+        const replies = Object.values(thread.replies ?? {}).map(contractPostToUiPost);
+        replies.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+        this.callbacks.onRepliesUpdated?.(threadRoot, replies);
         return;
       }
       // Global-index GET (public-timeline snapshot): the singleton's state is a
@@ -1384,6 +1408,140 @@ export class FreenetConnection {
     const idx = this.pendingQuoteRefs.findIndex((p) => p.nonce === nonce);
     if (idx === -1) return false;
     this.pendingQuoteRefs.splice(idx, 1);
+    return true;
+  }
+
+  /**
+   * Reply to a post. Derives/instantiates the root post's thread shard, then
+   * asks the delegate to sign a reply Post (via `SignReply`); the matching
+   * `SignedReply` response is routed to {@link completeReply}, which folds the signed
+   * post into the thread shard via `ThreadDelta::Replies`. Returns false if it
+   * cannot proceed (no shard / delegate). A reply is structurally a Post with
+   * `reply_to` set — there is no separate record type (see backend facts, #12).
+   */
+  async replyPost(rootPostId: string, content: string): Promise<boolean> {
+    if (!this.api || !this.currentUser) return false;
+    const key = this.threadKeyFor(rootPostId);
+    if (!key) {
+      console.warn("[thread] no thread-shard code hash — cannot reply");
+      return false;
+    }
+    try {
+      await this.ensureThreadShard(key, rootPostId);
+      this.subscribeThread(key);
+    } catch (e) {
+      console.error("[thread] ensure/subscribe failed:", e);
+      return false;
+    }
+    const nonce = crypto.randomUUID();
+    const timestamp = Date.now();
+    this.pendingReplies.push({
+      nonce,
+      rootPostId,
+      author_name: this.currentUser.name,
+      author_handle: this.currentUser.handle,
+      content,
+      timestamp,
+    });
+    const requested = signReply(
+      nonce,
+      content,
+      this.currentUser.name,
+      this.currentUser.handle,
+      timestamp,
+      rootPostId,
+    );
+    if (!requested) {
+      this.pendingReplies.pop();
+      console.warn("[thread] cannot reply: delegate not connected to sign");
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Complete a reply once the delegate returns a `Signed` response for a
+   * `SignReply` request. Mirrors {@link completeLike}: matches the pending entry
+   * by nonce, assembles the signed ContractPost (reply_to populated), and sends
+   * a `ThreadDelta::Replies` UpdateRequest to the root post's thread shard.
+   */
+  async completeReply(signed: {
+    nonce: string;
+    post_id: string;
+    signature: string;
+    public_key: string;
+  }): Promise<boolean> {
+    if (!this.api) return false;
+    const idx = this.pendingReplies.findIndex((p) => p.nonce === signed.nonce);
+    if (idx === -1) {
+      console.warn("[thread] Signed (reply) with no matching pending reply", signed.nonce);
+      return false;
+    }
+    const [pending] = this.pendingReplies.splice(idx, 1);
+    const key = this.threadKeyFor(pending.rootPostId);
+    if (!key) return false;
+
+    const post: ContractPost = {
+      id: signed.post_id,
+      author_pubkey: signed.public_key,
+      author_name: pending.author_name,
+      author_handle: pending.author_handle,
+      content: pending.content,
+      timestamp: pending.timestamp,
+      reply_to: pending.rootPostId,
+      signature: signed.signature,
+    };
+    try {
+      const deltaBytes = new TextEncoder().encode(
+        JSON.stringify({ Replies: [post] }),
+      );
+      const update = new UpdateData(
+        UpdateDataType.DeltaUpdate,
+        new DeltaUpdate(Array.from(deltaBytes)),
+      );
+      await this.api.update(new UpdateRequest(key, update));
+      // Refresh to pick up the updated reply count.
+      this.refreshLikesNow(pending.rootPostId);
+      return true;
+    } catch (e) {
+      console.error("[thread] failed to send reply:", e);
+      this.refreshLikesNow(pending.rootPostId);
+      return false;
+    }
+  }
+
+  /**
+   * Load the reply list for a thread. Called when the user opens a thread view
+   * so the reply list is populated even on a fresh page load (before any
+   * engagement action has been taken). Derives and registers the thread key,
+   * instantiates the shard if absent, subscribes for live deltas, then issues a
+   * GET so {@link handleGetResponse} fires {@link FreenetCallbacks.onRepliesUpdated}.
+   * Fire-and-forget: mirrors the {@link loadUserShard} / {@link loadGlobalIndex}
+   * pattern. A spurious re-PUT over an already-instantiated shard is a harmless
+   * CRDT merge (see the comment at ensureThreadShard line 663–665).
+   */
+  loadThreadReplies(rootPostId: string): void {
+    const key = this.threadKeyFor(rootPostId);
+    if (!key) {
+      console.warn("[thread] no thread-shard code hash — cannot load replies");
+      return;
+    }
+    this.ensureThreadShard(key, rootPostId)
+      .then(() => {
+        this.subscribeThread(key);
+        this.refreshLikesNow(rootPostId);
+      })
+      .catch((e) => console.error("[thread] loadThreadReplies failed:", e));
+  }
+
+  /**
+   * Drop a pending reply by nonce (delegate returned an Error for it). Returns
+   * true if a pending reply was actually dropped. Mirror of {@link dropPendingLike}.
+   */
+  dropPendingReply(nonce: string): boolean {
+    const idx = this.pendingReplies.findIndex((p) => p.nonce === nonce);
+    if (idx === -1) return false;
+    this.pendingReplies.splice(idx, 1);
     return true;
   }
 

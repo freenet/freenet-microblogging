@@ -15,11 +15,14 @@
     identity,
     posts,
     globalPosts,
+    threadReplies,
     keyExportSecret,
     publish,
     like,
     repost,
     quote,
+    reply,
+    loadThreadReplies,
     completeOnboarding,
   } from "./stores/freenet";
   import type { Post } from "./types";
@@ -51,11 +54,12 @@
   // and passed it through to Feed/PostCard for the following-note affordances.
   const followedPubkeys = new Set<string>();
 
-  // Thread replies: app.ts openThread surfaced the posts that quote the root.
-  let threadReplies = $derived(
-    threadRoot
-      ? $posts.filter((p) => p.quotedPostId === threadRoot!.id)
-      : [],
+  // Thread replies: sourced from the thread-shard replies store (keyed by root
+  // post id), which is populated by onRepliesUpdated whenever the thread shard
+  // is read (on like/repost/subscribe). NOT the feed posts list — replies live
+  // in the thread shard, not in the owner's user shard.
+  let currentThreadReplies = $derived(
+    threadRoot ? ($threadReplies.get(threadRoot.id) ?? []) : [],
   );
 
   // My posts for the profile view (app.ts navigate "profile" logic).
@@ -81,13 +85,13 @@
 
   function openThread(post: Post): void {
     threadRoot = post;
+    // Eagerly fetch the thread shard so replies are visible on first open
+    // (before any engagement action has been taken on this session).
+    loadThreadReplies(post.id);
   }
 
-  // app.ts wired Thread's reply callback as `cb.reply?.(...)`, but index.ts
-  // never supplied a `reply` callback to createApp — so replies were a no-op
-  // until the #12 backend lands. Preserve that exact behavior here.
-  function onThreadReply(_rootPostId: string, _content: string): void {
-    // intentionally no-op (reply backend not yet wired)
+  function onThreadReply(rootPostId: string, content: string): void {
+    reply(rootPostId, content);
   }
 
   // ---- Compose ----
@@ -141,7 +145,7 @@
       {#if threadRoot}
         <Thread
           root={threadRoot}
-          replies={threadReplies}
+          replies={currentThreadReplies}
           onBack={() => (threadRoot = null)}
           onReply={onThreadReply}
         />
