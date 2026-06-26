@@ -24,7 +24,7 @@ survives every release.
 - [x] Public timeline: landing feed + Discover tab backed by the global-index shard
 - [x] Facade contract — stable bookmarkable URL that survives release contract-id rotation
 - [ ] Wire follows UI to the user shard (Following tab exists but empty)
-- [ ] Wire replies UI + delegate reply signing to the thread shard (`onThreadReply` is a no-op, pending #12)
+- [x] Wire replies UI + delegate reply signing (`SignReply`) to the thread shard (#12; nested threads / `thread_root` still TODO)
 - [ ] Wire notifications UI to the inbox shard (contract done; UI renders mock records)
 - [ ] Handle registry: handle → pubkey resolution (no registry contract yet)
 - [ ] Real "who to follow" + search backed by the social graph / an index (currently mock/local-filter)
@@ -157,11 +157,11 @@ It supports:
 - **GetIdentity**: Retrieve the current identity
 - **SignPost**: Sign post content for authenticity (assigns the content-addressed post id)
 - **SignLike**: Sign a like/unlike record bound to a thread's root post id
+- **SignReply**: Sign a reply (a `Post` with a non-empty `reply_to`, optional `quoted_post`) bound to a thread's root post id; `SignPost` stays byte-identical for top-level posts
 - **ExportIdentity / ImportIdentity**: Transfer identity between devices (64-hex seed)
 
-Reply signing (a `SignPost` with a non-empty `reply_to`) and notification delivery are not yet
-wired from the UI — the thread shard verifies replies and the inbox shard accepts notifications,
-but the client cutover for those surfaces lands in later ADR-0001 Phase 4 slices.
+Notification delivery is not yet wired from the UI — the inbox shard accepts notifications,
+but the client cutover for that surface lands in a later ADR-0001 Phase 4 slice.
 
 The delegate key is computed as `BLAKE3(BLAKE3(wasm_bytes))` with empty parameters, and the code
 hash as `BLAKE3(wasm_bytes)`. Both are required for the node to locate the delegate in its store.

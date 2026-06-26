@@ -107,6 +107,7 @@ vi.mock("./identity", () => ({
   signLike: vi.fn(() => true),
   signRepost: vi.fn(() => true),
   signQuoteRef: vi.fn(() => true),
+  signReply: vi.fn(() => true),
 }));
 
 import {
@@ -116,6 +117,7 @@ import {
   type RepostState,
   type QuoteState,
 } from "./freenet-api";
+import type { Post } from "./types";
 
 // A real ML-DSA-65 VK is 1952 bytes → 3904 hex chars; setUser only initialises
 // the user shard for a key of exactly that length (the offline 64-char fake is
@@ -130,6 +132,7 @@ function makeConnection() {
     onLikeUpdated: ReturnType<typeof vi.fn>;
     onRepostUpdated: ReturnType<typeof vi.fn>;
     onQuoteUpdated: ReturnType<typeof vi.fn>;
+    onRepliesUpdated: ReturnType<typeof vi.fn>;
     onGlobalPostsLoaded: ReturnType<typeof vi.fn>;
     onNewGlobalPost: ReturnType<typeof vi.fn>;
   } = {
@@ -139,6 +142,7 @@ function makeConnection() {
     onLikeUpdated: vi.fn(),
     onRepostUpdated: vi.fn(),
     onQuoteUpdated: vi.fn(),
+    onRepliesUpdated: vi.fn(),
     onGlobalPostsLoaded: vi.fn(),
     onNewGlobalPost: vi.fn(),
   };
@@ -976,6 +980,181 @@ describe("FreenetConnection", () => {
       expect(() => conn.loadGlobalIndex()).not.toThrow();
       // No FakeWsApi instance was created (connect not called) and thus no GET.
       expect(FakeWsApi.instances.length).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Reply path — mirrors the like/repost/quote test patterns exactly.
+  // -------------------------------------------------------------------------
+  describe("reply path", () => {
+    describe("dropPendingReply — nonce matching", () => {
+      it("returns false for an unknown nonce; true then false for a real pending reply", async () => {
+        const { conn, api } = makeConnection();
+        conn.setUser(OWNER_VK, "Alice", "alice");
+        // Drain all user-shard GETs (probe + loadUserShard) so the serialised
+        // GET chain is idle before replyPost (which itself awaits ensureThreadShard).
+        await drainGets(api);
+
+        // Seed a pending reply via replyPost. It calls ensureThreadShard (probe
+        // GET) then records the pending entry and calls signReply (mock -> true).
+        const replyPromise = conn.replyPost("root-reply-drop", "hello thread");
+        await flush();
+        api.getCalls[api.getCalls.length - 1].resolve({} as GetResponse); // probe exists
+        const ok = await replyPromise;
+        expect(ok).toBe(true);
+
+        // Unknown nonce is always false.
+        expect(conn.dropPendingReply("nonce-that-does-not-exist")).toBe(false);
+
+        // Retrieve the real nonce from the signReply mock call.
+        const signReplyMock = (await import("./identity"))
+          .signReply as unknown as ReturnType<typeof vi.fn>;
+        const nonce = signReplyMock.mock.calls[
+          signReplyMock.mock.calls.length - 1
+        ][0] as string;
+
+        expect(conn.dropPendingReply(nonce)).toBe(true);  // matched -> dropped
+        expect(conn.dropPendingReply(nonce)).toBe(false); // already gone
+      });
+    });
+
+    describe("optimistic reply revert", () => {
+      it("completeReply (matched nonce) sends a Replies delta then refreshes on SUCCESS", async () => {
+        const { conn, api } = makeConnection();
+        conn.setUser(OWNER_VK, "Alice", "alice");
+        // Drain all user-shard GETs so the chain is idle before replyPost.
+        await drainGets(api);
+
+        const signReplyMock = (await import("./identity"))
+          .signReply as unknown as ReturnType<typeof vi.fn>;
+        const replyPromise = conn.replyPost("root-reply-ok", "my reply");
+        await flush();
+        api.getCalls[api.getCalls.length - 1].resolve({} as GetResponse); // probe exists
+        await replyPromise;
+        // signReply(nonce, content, name, handle, timestamp, rootPostId) — first arg is nonce.
+        const nonce = signReplyMock.mock.calls[
+          signReplyMock.mock.calls.length - 1
+        ][0] as string;
+
+        const getsBefore = api.getCalls.length;
+        const ok = await conn.completeReply({
+          nonce,
+          post_id: "reply-post-id",
+          signature: "sig",
+          public_key: OWNER_VK,
+        });
+        expect(ok).toBe(true);
+        // A DeltaUpdate was sent and a refresh GET followed.
+        expect(api.updateCalls.length).toBe(1);
+        expect(api.getCalls.length).toBe(getsBefore + 1);
+        // The matched nonce was consumed; dropping it again is a no-op.
+        expect(conn.dropPendingReply(nonce)).toBe(false);
+      });
+
+      it("completeReply with an UNMATCHED nonce returns false and does NOT call update", async () => {
+        const { conn, api } = makeConnection();
+        conn.setUser(OWNER_VK, "Alice", "alice");
+        // Drain all user-shard GETs so the chain is idle before replyPost.
+        await drainGets(api);
+
+        // Seed a real pending reply so the state isn't empty, but call
+        // completeReply with a foreign nonce — must no-op and return false.
+        const signReplyMock = (await import("./identity"))
+          .signReply as unknown as ReturnType<typeof vi.fn>;
+        const replyPromise = conn.replyPost("root-reply-unmatched", "content");
+        await flush();
+        api.getCalls[api.getCalls.length - 1].resolve({} as GetResponse);
+        await replyPromise;
+        const realNonce = signReplyMock.mock.calls[
+          signReplyMock.mock.calls.length - 1
+        ][0] as string;
+
+        const updatesBefore = api.updateCalls.length;
+        const getsBefore = api.getCalls.length;
+        const res = await conn.completeReply({
+          nonce: "foreign-nonce",
+          post_id: "pid",
+          signature: "sig",
+          public_key: OWNER_VK,
+        });
+        expect(res).toBe(false);
+        expect(api.updateCalls.length).toBe(updatesBefore); // no update sent
+        expect(api.getCalls.length).toBe(getsBefore);       // no refresh GET
+
+        // The real pending reply is still there: completing it now succeeds.
+        const res2 = await conn.completeReply({
+          nonce: realNonce,
+          post_id: "pid",
+          signature: "sig",
+          public_key: OWNER_VK,
+        });
+        expect(res2).toBe(true);
+        expect(api.updateCalls.length).toBe(updatesBefore + 1);
+      });
+    });
+
+    it("a thread-shard GET emits onRepliesUpdated with replies sorted oldest-first", async () => {
+      const { conn, api, callbacks } = makeConnection();
+      conn.setUser(OWNER_VK, "Alice", "alice");
+      await flush();
+      api.getCalls[0].resolve({} as GetResponse); // user-shard probe exists
+      await flush();
+      await flush();
+      if (api.getCalls[1]) api.getCalls[1].resolve({} as GetResponse); // loadUserShard GET
+      await flush();
+      await flush();
+
+      // Register the thread instance→root mapping via repostPost (cheapest path).
+      const rootId = "reply-thread-root";
+      const rp = conn.repostPost(rootId, true);
+      await flush();
+      const probe = api.getCalls[api.getCalls.length - 1];
+      probe.resolve({} as GetResponse);
+      await rp;
+
+      // Two replies with out-of-order timestamps — newer listed first in the
+      // map to prove the read side sorts oldest-first (asc by timestamp).
+      const replies = {
+        r2: {
+          id: "r2",
+          author_pubkey: OWNER_VK,
+          author_name: "Alice",
+          author_handle: "alice",
+          content: "second reply",
+          timestamp: 5000,
+          reply_to: rootId,
+          quoted_post: "",
+          signature: "s2",
+        },
+        r1: {
+          id: "r1",
+          author_pubkey: "cd".repeat(1952),
+          author_name: "Bob",
+          author_handle: "bob",
+          content: "first reply",
+          timestamp: 1000,
+          reply_to: rootId,
+          quoted_post: "",
+          signature: "s1",
+        },
+      };
+      const stateBytes = Array.from(
+        new TextEncoder().encode(JSON.stringify({ replies })),
+      );
+      callbacks.onRepliesUpdated.mockClear();
+      api.handler.onContractGet({
+        key: probe.req.key,
+        state: stateBytes,
+      } as unknown as GetResponse);
+
+      expect(callbacks.onRepliesUpdated).toHaveBeenCalledTimes(1);
+      const [emittedRootId, emittedReplies] =
+        callbacks.onRepliesUpdated.mock.calls[0] as [string, Post[]];
+      expect(emittedRootId).toBe(rootId);
+      // Oldest first (timestamp asc).
+      expect(emittedReplies.map((p) => p.id)).toEqual(["r1", "r2"]);
+      expect(emittedReplies[0].content).toBe("first reply");
+      expect(emittedReplies[1].content).toBe("second reply");
     });
   });
 
