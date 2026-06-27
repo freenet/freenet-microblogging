@@ -460,9 +460,10 @@ makes everything silently no-op.
 ## Phase 4 decisions (thread shard — likes, slice 2)
 
 Slice 2 wires the **thread shard** for one operation end-to-end — **likes** —
-to prove the delegate→sign→thread-shard→UI loop for a non-post record. Replies,
-quotes, the inbox shard, the notifications UI, and the legacy global-contract
-teardown are each their own later slice.
+to prove the delegate→sign→thread-shard→UI loop for a non-post record. Quotes
+and replies followed in later slices (replies via `SignReply`, see below); the
+inbox shard, the notifications UI, and the legacy global-contract teardown are
+each their own later slice.
 
 ### Delegate signs non-post records via the same single trusted encoder
 
@@ -476,6 +477,16 @@ one audited place; the browser only assembles the returned fields into a
 `SignPayload{bytes}` with the payload built in TS — would have moved a subtle,
 unaudited correctness surface into JavaScript.) Quotes/replies/notifications/
 prunes follow this same per-record-message pattern in later slices.
+
+Replies use the same pattern via a `SignReply{nonce, content, author_name,
+author_handle, timestamp, reply_to, quoted_post}` → `SignedReply{…, post_id,
+signature}` message (#12). A reply is structurally a `Post` with a non-empty
+`reply_to`, so the delegate reuses the post encoder
+(`common::Post::signing_payload`, which appends `reply_to`/`quoted_post` only
+when non-empty). That keeps top-level `SignPost` output **byte-identical** —
+existing post signatures are unaffected — while the thread shard's
+`reply_is_acceptable` gate (`post.reply_to == root && post.verify()`) binds a
+reply to its thread and makes rebinding to another root fail verification.
 
 ### Thread-shard key derivation: parameter is the UTF-8 id string
 

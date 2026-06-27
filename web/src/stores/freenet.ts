@@ -234,6 +234,16 @@ export const connection = new FreenetConnection({
       next.set(rootPostId, replies);
       return next;
     });
+    // Reply count comes from the authoritative thread-shard reply list —
+    // same cadence as like/quote aggregates: only refreshes when that post's
+    // thread shard is read.
+    posts.update((cur) => {
+      const post = cur.find((p) => p.id === rootPostId);
+      if (post) {
+        post.replies = replies.length;
+      }
+      return [...cur];
+    });
   },
   onDelegateResponse: (response: DelegateResponse) => {
     const payloads = parseDelegateResponse(response);
@@ -251,9 +261,9 @@ export const connection = new FreenetConnection({
         return;
       }
 
-      // A signed post (or reply) came back from the delegate. Try completeReply
-      // first (matches by nonce against pendingReplies); if it returns false the
-      // nonce belongs to a regular publish — route there instead.
+      // A signed post (or reply) came back from the delegate. Route by the
+      // delegate-tagged response type: SignedReply → completeReply only;
+      // Signed → completePublish only. No fallback probing needed.
       const signed = payload as {
         type?: string;
         nonce?: string;
@@ -268,27 +278,25 @@ export const connection = new FreenetConnection({
         signed.signature &&
         signed.public_key
       ) {
-        connection
-          .completeReply({
-            nonce: signed.nonce,
-            post_id: signed.post_id,
-            signature: signed.signature,
-            public_key: signed.public_key,
-          })
-          .then((handled) => {
-            if (!handled) {
-              // Not a reply — route to the regular publish path.
-              connection
-                .completePublish({
-                  nonce: signed.nonce!,
-                  post_id: signed.post_id!,
-                  signature: signed.signature!,
-                  public_key: signed.public_key!,
-                })
-                .catch((e) => console.error("[delegate] completePublish failed:", e));
-            }
-          })
-          .catch((e) => console.error("[delegate] completeReply failed:", e));
+        if (signed.type === "SignedReply") {
+          connection
+            .completeReply({
+              nonce: signed.nonce,
+              post_id: signed.post_id,
+              signature: signed.signature,
+              public_key: signed.public_key,
+            })
+            .catch((e) => console.error("[delegate] completeReply failed:", e));
+        } else {
+          connection
+            .completePublish({
+              nonce: signed.nonce,
+              post_id: signed.post_id,
+              signature: signed.signature,
+              public_key: signed.public_key,
+            })
+            .catch((e) => console.error("[delegate] completePublish failed:", e));
+        }
         return;
       }
 
