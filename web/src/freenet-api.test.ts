@@ -982,6 +982,36 @@ describe("FreenetConnection", () => {
       expect(FakeWsApi.instances.length).toBe(0);
     });
 
+    it("a global-index STATE notification (cross-node broadcast) emits onGlobalPostsLoaded", async () => {
+      // Updates relayed from ANOTHER NODE arrive as UpdateData::State — the
+      // full post-merge state, not the delta. Dropping those silently was the
+      // live cross-node gap traced in freenet-core#4764.
+      const { conn, api, callbacks } = makeConnection();
+      const probe = await loadGlobalAndGetProbe(conn, api);
+
+      const posts = {
+        remote: gPost({ id: "remote-1", content: "from another node", timestamp: 2000 }),
+        reply: gPost({ id: "r2", content: "a reply", reply_to: "remote-1" }),
+      };
+      api.handler.onContractUpdateNotification({
+        key: probe.req.key,
+        update: {
+          updateDataType: UpdateDataType.StateUpdate,
+          updateData: { state: globalStateBytes(posts) },
+        },
+      } as unknown as UpdateNotification);
+
+      // Routed through the LOADED path (merge-not-replace in the store), with
+      // replies filtered out of the public timeline.
+      expect(callbacks.onGlobalPostsLoaded).toHaveBeenCalledTimes(1);
+      const emitted = callbacks.onGlobalPostsLoaded.mock.calls[0][0] as Array<{
+        id: string;
+      }>;
+      expect(emitted.map((p) => p.id)).toEqual(["remote-1"]);
+      expect(callbacks.onNewGlobalPost).not.toHaveBeenCalled();
+      expect(callbacks.onPostsLoaded).not.toHaveBeenCalled();
+    });
+
     it("re-issues the subscribe once after the first successful GET, then stops", async () => {
       // The boot-time subscribe is rejected by the node when the singleton is
       // not instantiated yet and that rejection never reaches the stdlib

@@ -256,6 +256,45 @@ function contractPostToUiPost(cp: ContractPost): Post {
  */
 const GLOBAL_INDEX_REFRESH_MS = 60_000;
 
+/**
+ * Extract the DELTA payload of an update notification as a JSON string, or
+ * null when the notification carries no delta. Deltas arrive on a local
+ * client's own UPDATE echo (`DeltaUpdate`) and on `StateAndDeltaUpdate`.
+ */
+function notificationDelta(notification: UpdateNotification): string | null {
+  const updateData = notification.update as UpdateData;
+  if (!updateData) return null;
+  const t = updateData.updateDataType;
+  if (t !== UpdateDataType.DeltaUpdate && t !== UpdateDataType.StateAndDeltaUpdate) {
+    return null;
+  }
+  const payload = updateData.updateData as { delta?: number[] } | null;
+  if (!payload?.delta) return null;
+  return new TextDecoder("utf8")
+    .decode(Uint8Array.from(payload.delta))
+    .replace(/\x00/g, "");
+}
+
+/**
+ * Extract the FULL-STATE payload of an update notification as a JSON string,
+ * or null when the notification carries no state. Relayed/broadcast updates
+ * from other nodes arrive as `StateUpdate` — the post-merge state, same JSON
+ * as a GET response.
+ */
+function notificationState(notification: UpdateNotification): string | null {
+  const updateData = notification.update as UpdateData;
+  if (!updateData) return null;
+  const t = updateData.updateDataType;
+  if (t !== UpdateDataType.StateUpdate && t !== UpdateDataType.StateAndDeltaUpdate) {
+    return null;
+  }
+  const payload = updateData.updateData as { state?: number[] } | null;
+  if (!payload?.state) return null;
+  return new TextDecoder("utf8")
+    .decode(Uint8Array.from(payload.state))
+    .replace(/\x00/g, "");
+}
+
 // Deterministic color from string
 function stringToColor(str: string): string {
   let hash = 0;
@@ -571,22 +610,34 @@ export class FreenetConnection {
         this.refreshLikes(threadRoot);
         return;
       }
-      // Global-index update (a post was shared to the public timeline): the
-      // delta is the externally-tagged `GlobalIndexDelta::Posts` (`{"Posts":[…]}`)
-      // — the SAME wire shape as the user-shard Posts delta — so parse it the
-      // same way and emit each (top-level) post live.
+      // Global-index update (a post was shared to the public timeline). The
+      // payload shape depends on WHERE the update came from:
+      //  * a local client's own UPDATE echoes back as the DELTA it sent — the
+      //    externally-tagged `GlobalIndexDelta::Posts` (`{"Posts":[…]}`);
+      //  * an update relayed/broadcast FROM ANOTHER NODE arrives as the FULL
+      //    post-merge STATE (`UpdateData::State`, same JSON as a GET response).
+      // Handling only the delta silently dropped every cross-node update
+      // (freenet-core#4764 investigation), so both are parsed here.
       if (this.globalIndexInstanceId !== null && notifId === this.globalIndexInstanceId) {
-        const updateData = notification.update as UpdateData;
-        if (!updateData || updateData.updateDataType !== UpdateDataType.DeltaUpdate) return;
-        const delta = updateData.updateData as { delta: number[] } | null;
-        if (!delta) return;
-        const deltaJson = new TextDecoder("utf8").decode(Uint8Array.from(delta.delta));
-        const parsed = JSON.parse(deltaJson.replace(/\x00/g, "")) as {
-          Posts?: ContractPost[];
-        };
-        for (const cp of parsed.Posts ?? []) {
-          if (cp.reply_to) continue; // top-level public timeline only
-          this.callbacks.onNewGlobalPost?.(contractPostToUiPost(cp));
+        const deltaPayload = notificationDelta(notification);
+        if (deltaPayload !== null) {
+          const parsed = JSON.parse(deltaPayload) as { Posts?: ContractPost[] };
+          for (const cp of parsed.Posts ?? []) {
+            if (cp.reply_to) continue; // top-level public timeline only
+            this.callbacks.onNewGlobalPost?.(contractPostToUiPost(cp));
+          }
+          return;
+        }
+        const statePayload = notificationState(notification);
+        if (statePayload !== null) {
+          // Full snapshot: route through the loaded path — the store merges
+          // rather than replaces, so this composes with the poll re-GET.
+          const rawPosts = (JSON.parse(statePayload) as GlobalIndexState).posts ?? {};
+          const posts = Object.values(rawPosts)
+            .filter((cp) => !cp.reply_to)
+            .map(contractPostToUiPost);
+          posts.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+          this.callbacks.onGlobalPostsLoaded?.(posts);
         }
         return;
       }
@@ -594,21 +645,27 @@ export class FreenetConnection {
       if (this.userShardInstanceId === null || notifId !== this.userShardInstanceId) {
         return;
       }
-      const updateData = notification.update as UpdateData;
-      if (!updateData || updateData.updateDataType !== UpdateDataType.DeltaUpdate) return;
-      const delta = updateData.updateData as { delta: number[] } | null;
-      if (!delta) return;
-      const decoder = new TextDecoder("utf8");
-      const deltaJson = decoder.decode(Uint8Array.from(delta.delta));
       // User-shard deltas are the externally-tagged `ShardDelta` enum
       // (`{"Posts":[…]}` / `{"Op":…}`). Op deltas (profile/follow) carry no feed
-      // posts — ignore them here.
-      const parsed = JSON.parse(deltaJson.replace(/\x00/g, "")) as {
-        Posts?: ContractPost[];
-        Op?: unknown;
-      };
-      for (const cp of parsed.Posts ?? []) {
-        this.callbacks.onNewPost(contractPostToUiPost(cp));
+      // posts — ignore them here. Cross-node updates arrive as full state (see
+      // the global-index branch above), whose JSON is `{posts:[…]}`.
+      const deltaPayload = notificationDelta(notification);
+      if (deltaPayload !== null) {
+        const parsed = JSON.parse(deltaPayload) as {
+          Posts?: ContractPost[];
+          Op?: unknown;
+        };
+        for (const cp of parsed.Posts ?? []) {
+          this.callbacks.onNewPost(contractPostToUiPost(cp));
+        }
+        return;
+      }
+      const statePayload = notificationState(notification);
+      if (statePayload !== null) {
+        const rawPosts = (JSON.parse(statePayload) as UserShardState).posts ?? [];
+        const posts = rawPosts.map(contractPostToUiPost);
+        posts.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+        this.callbacks.onPostsLoaded(posts);
       }
     } catch (e) {
       console.error("[freenet] Failed to parse update:", e);
