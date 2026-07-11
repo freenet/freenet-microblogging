@@ -247,6 +247,15 @@ function contractPostToUiPost(cp: ContractPost): Post {
   };
 }
 
+/**
+ * Cadence of the public-timeline re-GET fallback. Slow on purpose: it only
+ * exists to backstop the live-delta path (the network drops a delta broadcast
+ * when the subscription tree is still forming and never re-sends it — #50),
+ * so one singleton GET a minute per session keeps Discover eventually
+ * consistent without meaningfully loading the node.
+ */
+const GLOBAL_INDEX_REFRESH_MS = 60_000;
+
 // Deterministic color from string
 function stringToColor(str: string): string {
   let hash = 0;
@@ -357,6 +366,17 @@ export class FreenetConnection {
   private globalIndexEnsured = false;
   /** Collapses concurrent first-share races into one GET-probe + PUT. */
   private globalIndexEnsurePromise: Promise<void> | null = null;
+  /**
+   * Set once a subscribe was issued AFTER a successful global-index GET. The
+   * boot-time subscribe is rejected by the node when the singleton is not yet
+   * instantiated ("contract WASM not cached locally") and that rejection never
+   * surfaces to the stdlib promise — so the only reliable point to subscribe
+   * is right after a GET succeeded (the contract is then cached locally and
+   * the node accepts). See #50.
+   */
+  private globalIndexSubscribedAfterGet = false;
+  /** Periodic public-timeline re-GET fallback (see startGlobalIndexRefresh). */
+  private globalIndexRefreshTimer: ReturnType<typeof setInterval> | null = null;
   /** Likes awaiting a delegate `SignedLike`, keyed by nonce. */
   private pendingLikes: PendingLike[] = [];
   /** Per-thread debounce timers coalescing like-refresh GETs (root id → timer). */
@@ -821,12 +841,51 @@ export class FreenetConnection {
     // so it is the reliable "read path ran on a live node" marker, distinct from
     // the "[freenet] Loaded N …" success log emitted only on a populated index.
     console.log("[global-index] loading public timeline");
-    this.serializedGet(new GetRequest(key, true)).catch((e) =>
-      console.error("[global-index] get failed:", e),
+    this.serializedGet(new GetRequest(key, true)).then(
+      () => {
+        // The GET cached the contract locally, so a subscribe is now accepted
+        // by the node. The boot-time attempt below is rejected on a fresh
+        // network (singleton not instantiated yet) and that rejection is
+        // invisible client-side — this post-GET retry is the reliable one.
+        this.subscribeGlobalIndexAfterGet();
+      },
+      (e) => console.error("[global-index] get failed:", e),
     );
     // Mirror the user-shard flow (loadUserShard + subscribeUserShard): a reader
-    // also subscribes so subsequently-shared posts arrive live as deltas.
+    // also subscribes so subsequently-shared posts arrive live as deltas. Once
+    // the post-GET retry has landed, stop re-issuing this on refresh ticks.
+    if (!this.globalIndexSubscribedAfterGet) this.subscribeGlobalIndex();
+    // Live deltas alone are not enough: the network drops an update's
+    // broadcast when the subscription tree hasn't formed yet (freenet-core
+    // fire-and-forget, no anti-entropy), so a subscribed session can still
+    // miss posts shared from other nodes. A slow re-GET keeps Discover
+    // eventually consistent regardless (#50).
+    this.startGlobalIndexRefresh();
+  }
+
+  /**
+   * Retry the global-index subscribe once, right after a successful GET (the
+   * contract is then cached locally, so the node accepts it). No-op after the
+   * first success — subscribing is idempotent on the node but there is no
+   * point re-issuing it on every 60s refresh tick.
+   */
+  private subscribeGlobalIndexAfterGet(): void {
+    if (this.globalIndexSubscribedAfterGet) return;
+    this.globalIndexSubscribedAfterGet = true;
     this.subscribeGlobalIndex();
+  }
+
+  /**
+   * Start the periodic public-timeline re-GET fallback. One interval per API
+   * instance; each tick re-runs {@link loadGlobalIndex}, which no-ops
+   * harmlessly when the socket is down (`this.api` null) and re-arms the
+   * post-GET subscribe when it has not succeeded yet.
+   */
+  private startGlobalIndexRefresh(): void {
+    if (this.globalIndexRefreshTimer !== null) return;
+    this.globalIndexRefreshTimer = setInterval(() => {
+      this.loadGlobalIndex();
+    }, GLOBAL_INDEX_REFRESH_MS);
   }
 
   /**

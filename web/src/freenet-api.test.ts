@@ -981,6 +981,61 @@ describe("FreenetConnection", () => {
       // No FakeWsApi instance was created (connect not called) and thus no GET.
       expect(FakeWsApi.instances.length).toBe(0);
     });
+
+    it("re-issues the subscribe once after the first successful GET, then stops", async () => {
+      // The boot-time subscribe is rejected by the node when the singleton is
+      // not instantiated yet and that rejection never reaches the stdlib
+      // promise — so a subscribe must be re-issued after a GET succeeded (the
+      // contract is then cached locally and the node accepts it). See #50.
+      const { conn, api } = makeConnection();
+      const probe = await loadGlobalAndGetProbe(conn, api);
+      // Boot attempt went out with the load.
+      expect(api.subscribeCalls.length).toBe(1);
+
+      probe.resolve({} as GetResponse);
+      await flush();
+      // Post-GET retry — the one the node is guaranteed to accept.
+      expect(api.subscribeCalls.length).toBe(2);
+
+      // Further loads (the refresh tick path) must not re-subscribe again.
+      const probe2 = await loadGlobalAndGetProbe(conn, api);
+      probe2.resolve({} as GetResponse);
+      await flush();
+      expect(api.subscribeCalls.length).toBe(2);
+    });
+
+    it("keeps re-GETting the public timeline on the refresh interval", async () => {
+      // Live deltas are dropped by the network when the subscription tree
+      // hasn't formed yet (fire-and-forget, no anti-entropy), so Discover
+      // needs a slow re-GET fallback to stay eventually consistent (#50).
+      vi.useFakeTimers();
+      try {
+        const { conn, api } = makeConnection();
+        conn.loadGlobalIndex();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(api.getCalls.length).toBe(1);
+        // Settle the in-flight GET so the serialized-GET chain can advance.
+        api.getCalls[0].resolve({} as GetResponse);
+        await vi.advanceTimersByTimeAsync(0);
+
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(api.getCalls.length).toBe(2);
+        api.getCalls[1].resolve({} as GetResponse);
+        await vi.advanceTimersByTimeAsync(0);
+
+        // A second explicit load must NOT stack a second interval: one more
+        // tick produces exactly one more GET (plus the explicit load's own).
+        conn.loadGlobalIndex();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(api.getCalls.length).toBe(3);
+        api.getCalls[2].resolve({} as GetResponse);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(api.getCalls.length).toBe(4);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   // -------------------------------------------------------------------------
