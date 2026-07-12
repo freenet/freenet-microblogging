@@ -777,3 +777,11 @@ echo "UPDATEing facade state at $FACADE_ID (port $PORT)"
 # fdev sends UpdateData::Delta and the contract rejects InvalidUpdate.
 fdev --port "$PORT" execute update --as-state "$FACADE_ID" "$STATE"
 '''
+
+[tasks.test-ui-multi-node]
+description = "Multi-node e2e: realistic usage journeys across a live 1-gateway + 2-peer network (two users, two nodes)"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+bash "${CARGO_MAKE_WORKING_DIRECTORY}/scripts/multi-node-e2e.sh"
+'''
