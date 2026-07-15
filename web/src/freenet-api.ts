@@ -247,6 +247,54 @@ function contractPostToUiPost(cp: ContractPost): Post {
   };
 }
 
+/**
+ * Cadence of the public-timeline re-GET fallback. Slow on purpose: it only
+ * exists to backstop the live-delta path (the network drops a delta broadcast
+ * when the subscription tree is still forming and never re-sends it — #50),
+ * so one singleton GET a minute per session keeps Discover eventually
+ * consistent without meaningfully loading the node.
+ */
+const GLOBAL_INDEX_REFRESH_MS = 60_000;
+
+/**
+ * Extract the DELTA payload of an update notification as a JSON string, or
+ * null when the notification carries no delta. Deltas arrive on a local
+ * client's own UPDATE echo (`DeltaUpdate`) and on `StateAndDeltaUpdate`.
+ */
+function notificationDelta(notification: UpdateNotification): string | null {
+  const updateData = notification.update as UpdateData;
+  if (!updateData) return null;
+  const t = updateData.updateDataType;
+  if (t !== UpdateDataType.DeltaUpdate && t !== UpdateDataType.StateAndDeltaUpdate) {
+    return null;
+  }
+  const payload = updateData.updateData as { delta?: number[] } | null;
+  if (!payload?.delta) return null;
+  return new TextDecoder("utf8")
+    .decode(Uint8Array.from(payload.delta))
+    .replace(/\x00/g, "");
+}
+
+/**
+ * Extract the FULL-STATE payload of an update notification as a JSON string,
+ * or null when the notification carries no state. Relayed/broadcast updates
+ * from other nodes arrive as `StateUpdate` — the post-merge state, same JSON
+ * as a GET response.
+ */
+function notificationState(notification: UpdateNotification): string | null {
+  const updateData = notification.update as UpdateData;
+  if (!updateData) return null;
+  const t = updateData.updateDataType;
+  if (t !== UpdateDataType.StateUpdate && t !== UpdateDataType.StateAndDeltaUpdate) {
+    return null;
+  }
+  const payload = updateData.updateData as { state?: number[] } | null;
+  if (!payload?.state) return null;
+  return new TextDecoder("utf8")
+    .decode(Uint8Array.from(payload.state))
+    .replace(/\x00/g, "");
+}
+
 // Deterministic color from string
 function stringToColor(str: string): string {
   let hash = 0;
@@ -357,6 +405,17 @@ export class FreenetConnection {
   private globalIndexEnsured = false;
   /** Collapses concurrent first-share races into one GET-probe + PUT. */
   private globalIndexEnsurePromise: Promise<void> | null = null;
+  /**
+   * Set once a subscribe was issued AFTER a successful global-index GET. The
+   * boot-time subscribe is rejected by the node when the singleton is not yet
+   * instantiated ("contract WASM not cached locally") and that rejection never
+   * surfaces to the stdlib promise — so the only reliable point to subscribe
+   * is right after a GET succeeded (the contract is then cached locally and
+   * the node accepts). See #50.
+   */
+  private globalIndexSubscribedAfterGet = false;
+  /** Periodic public-timeline re-GET fallback (see startGlobalIndexRefresh). */
+  private globalIndexRefreshTimer: ReturnType<typeof setInterval> | null = null;
   /** Likes awaiting a delegate `SignedLike`, keyed by nonce. */
   private pendingLikes: PendingLike[] = [];
   /** Per-thread debounce timers coalescing like-refresh GETs (root id → timer). */
@@ -551,22 +610,34 @@ export class FreenetConnection {
         this.refreshLikes(threadRoot);
         return;
       }
-      // Global-index update (a post was shared to the public timeline): the
-      // delta is the externally-tagged `GlobalIndexDelta::Posts` (`{"Posts":[…]}`)
-      // — the SAME wire shape as the user-shard Posts delta — so parse it the
-      // same way and emit each (top-level) post live.
+      // Global-index update (a post was shared to the public timeline). The
+      // payload shape depends on WHERE the update came from:
+      //  * a local client's own UPDATE echoes back as the DELTA it sent — the
+      //    externally-tagged `GlobalIndexDelta::Posts` (`{"Posts":[…]}`);
+      //  * an update relayed/broadcast FROM ANOTHER NODE arrives as the FULL
+      //    post-merge STATE (`UpdateData::State`, same JSON as a GET response).
+      // Handling only the delta silently dropped every cross-node update
+      // (freenet-core#4764 investigation), so both are parsed here.
       if (this.globalIndexInstanceId !== null && notifId === this.globalIndexInstanceId) {
-        const updateData = notification.update as UpdateData;
-        if (!updateData || updateData.updateDataType !== UpdateDataType.DeltaUpdate) return;
-        const delta = updateData.updateData as { delta: number[] } | null;
-        if (!delta) return;
-        const deltaJson = new TextDecoder("utf8").decode(Uint8Array.from(delta.delta));
-        const parsed = JSON.parse(deltaJson.replace(/\x00/g, "")) as {
-          Posts?: ContractPost[];
-        };
-        for (const cp of parsed.Posts ?? []) {
-          if (cp.reply_to) continue; // top-level public timeline only
-          this.callbacks.onNewGlobalPost?.(contractPostToUiPost(cp));
+        const deltaPayload = notificationDelta(notification);
+        if (deltaPayload !== null) {
+          const parsed = JSON.parse(deltaPayload) as { Posts?: ContractPost[] };
+          for (const cp of parsed.Posts ?? []) {
+            if (cp.reply_to) continue; // top-level public timeline only
+            this.callbacks.onNewGlobalPost?.(contractPostToUiPost(cp));
+          }
+          return;
+        }
+        const statePayload = notificationState(notification);
+        if (statePayload !== null) {
+          // Full snapshot: route through the loaded path — the store merges
+          // rather than replaces, so this composes with the poll re-GET.
+          const rawPosts = (JSON.parse(statePayload) as GlobalIndexState).posts ?? {};
+          const posts = Object.values(rawPosts)
+            .filter((cp) => !cp.reply_to)
+            .map(contractPostToUiPost);
+          posts.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+          this.callbacks.onGlobalPostsLoaded?.(posts);
         }
         return;
       }
@@ -574,21 +645,27 @@ export class FreenetConnection {
       if (this.userShardInstanceId === null || notifId !== this.userShardInstanceId) {
         return;
       }
-      const updateData = notification.update as UpdateData;
-      if (!updateData || updateData.updateDataType !== UpdateDataType.DeltaUpdate) return;
-      const delta = updateData.updateData as { delta: number[] } | null;
-      if (!delta) return;
-      const decoder = new TextDecoder("utf8");
-      const deltaJson = decoder.decode(Uint8Array.from(delta.delta));
       // User-shard deltas are the externally-tagged `ShardDelta` enum
       // (`{"Posts":[…]}` / `{"Op":…}`). Op deltas (profile/follow) carry no feed
-      // posts — ignore them here.
-      const parsed = JSON.parse(deltaJson.replace(/\x00/g, "")) as {
-        Posts?: ContractPost[];
-        Op?: unknown;
-      };
-      for (const cp of parsed.Posts ?? []) {
-        this.callbacks.onNewPost(contractPostToUiPost(cp));
+      // posts — ignore them here. Cross-node updates arrive as full state (see
+      // the global-index branch above), whose JSON is `{posts:[…]}`.
+      const deltaPayload = notificationDelta(notification);
+      if (deltaPayload !== null) {
+        const parsed = JSON.parse(deltaPayload) as {
+          Posts?: ContractPost[];
+          Op?: unknown;
+        };
+        for (const cp of parsed.Posts ?? []) {
+          this.callbacks.onNewPost(contractPostToUiPost(cp));
+        }
+        return;
+      }
+      const statePayload = notificationState(notification);
+      if (statePayload !== null) {
+        const rawPosts = (JSON.parse(statePayload) as UserShardState).posts ?? [];
+        const posts = rawPosts.map(contractPostToUiPost);
+        posts.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+        this.callbacks.onPostsLoaded(posts);
       }
     } catch (e) {
       console.error("[freenet] Failed to parse update:", e);
@@ -821,12 +898,51 @@ export class FreenetConnection {
     // so it is the reliable "read path ran on a live node" marker, distinct from
     // the "[freenet] Loaded N …" success log emitted only on a populated index.
     console.log("[global-index] loading public timeline");
-    this.serializedGet(new GetRequest(key, true)).catch((e) =>
-      console.error("[global-index] get failed:", e),
+    this.serializedGet(new GetRequest(key, true)).then(
+      () => {
+        // The GET cached the contract locally, so a subscribe is now accepted
+        // by the node. The boot-time attempt below is rejected on a fresh
+        // network (singleton not instantiated yet) and that rejection is
+        // invisible client-side — this post-GET retry is the reliable one.
+        this.subscribeGlobalIndexAfterGet();
+      },
+      (e) => console.error("[global-index] get failed:", e),
     );
     // Mirror the user-shard flow (loadUserShard + subscribeUserShard): a reader
-    // also subscribes so subsequently-shared posts arrive live as deltas.
+    // also subscribes so subsequently-shared posts arrive live as deltas. Once
+    // the post-GET retry has landed, stop re-issuing this on refresh ticks.
+    if (!this.globalIndexSubscribedAfterGet) this.subscribeGlobalIndex();
+    // Live deltas alone are not enough: the network drops an update's
+    // broadcast when the subscription tree hasn't formed yet (freenet-core
+    // fire-and-forget, no anti-entropy), so a subscribed session can still
+    // miss posts shared from other nodes. A slow re-GET keeps Discover
+    // eventually consistent regardless (#50).
+    this.startGlobalIndexRefresh();
+  }
+
+  /**
+   * Retry the global-index subscribe once, right after a successful GET (the
+   * contract is then cached locally, so the node accepts it). No-op after the
+   * first success — subscribing is idempotent on the node but there is no
+   * point re-issuing it on every 60s refresh tick.
+   */
+  private subscribeGlobalIndexAfterGet(): void {
+    if (this.globalIndexSubscribedAfterGet) return;
+    this.globalIndexSubscribedAfterGet = true;
     this.subscribeGlobalIndex();
+  }
+
+  /**
+   * Start the periodic public-timeline re-GET fallback. One interval per API
+   * instance; each tick re-runs {@link loadGlobalIndex}, which no-ops
+   * harmlessly when the socket is down (`this.api` null) and re-arms the
+   * post-GET subscribe when it has not succeeded yet.
+   */
+  private startGlobalIndexRefresh(): void {
+    if (this.globalIndexRefreshTimer !== null) return;
+    this.globalIndexRefreshTimer = setInterval(() => {
+      this.loadGlobalIndex();
+    }, GLOBAL_INDEX_REFRESH_MS);
   }
 
   /**

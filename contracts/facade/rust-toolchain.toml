@@ -1,0 +1,21 @@
+# Facade-scoped rustc pin (issue #45). The facade contract's wasm bytes ARE
+# the stable bookmarkable id (hash of facade.wasm + params), so every input to
+# its codegen must be frozen — this crate is already excluded from the
+# workspace with its own Cargo.lock and `=x.y.z` dep pins for exactly that
+# reason. rustc itself was the last floating input: the committed
+# published-contract/facade.wasm was built on 1.96.0, but the workspace tracks
+# "stable", and a bump to 1.97.0 changed facade codegen (231135 → 258209 bytes)
+# and would have rotated the id, breaking every bookmarked URL.
+#
+# rustup resolves the nearest-ancestor rust-toolchain.toml, and both the CI
+# gate (scripts/check-facade-byte-equal.sh) and the snapshot builder
+# (scripts/build-facade-snapshot-linux.sh) `cd contracts/facade` before
+# building — so this pins ONLY the facade build. The workspace root stays on
+# "stable" and keeps tracking new rustc.
+#
+# Bumping the facade rustc is a DELIBERATE id rotation: change this pin, rebuild
+# the snapshot on linux/amd64, commit facade.wasm + facade-id.txt, and record
+# the new facade id in RELEASING.md.
+[toolchain]
+channel = "1.96.0"
+targets = ["wasm32-unknown-unknown"]
