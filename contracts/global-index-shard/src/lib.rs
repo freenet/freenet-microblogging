@@ -46,7 +46,7 @@
 //! wants a strictly top-level timeline must filter on `reply_to.is_empty()` at
 //! render time rather than assume the index is reply-free.
 
-use freenet_microblogging_common::post::{MAX_CONTENT_LEN, Post};
+use freenet_microblogging_common::post::Post;
 use freenet_microblogging_common::thread::WriterCert;
 use freenet_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -126,7 +126,10 @@ fn verify_writer_cert(_cert: Option<&WriterCert>) -> bool {
 /// check — the global index is a flat firehose, so any self-verifying post is
 /// eligible regardless of whether it is a reply, quote, or top-level post.
 fn post_is_acceptable(post: &Post) -> bool {
-    post.content.len() <= MAX_CONTENT_LEN && post.verify().is_ok() && verify_writer_cert(None)
+    // Bounds author name/handle as well as content — the public timeline is the
+    // widest-replicated surface in the system, so an unbounded author field here
+    // costs every node that carries the index.
+    post.within_bounds() && post.verify().is_ok() && verify_writer_cert(None)
 }
 
 /// Truncate posts to the newest `MAX_INDEX_POSTS` by `(timestamp, id)` desc — a
@@ -337,6 +340,9 @@ struct GlobalIndexStateDelta {
 #[cfg(test)]
 mod test {
     use super::*;
+    // Only the tests still name the content bound directly; the acceptance
+    // check goes through `Post::within_bounds`.
+    use freenet_microblogging_common::post::MAX_CONTENT_LEN;
     use ml_dsa::KeyGen;
     use ml_dsa::signature::{Keypair, Signer};
     use ml_dsa::{MlDsa65, Signature};

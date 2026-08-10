@@ -42,7 +42,7 @@
 //!   never by arrival order, which would diverge. Over-cap eviction is
 //!   best-effort lossy, the same trade-off as the post window.
 
-use freenet_microblogging_common::post::{MAX_CONTENT_LEN, Post};
+use freenet_microblogging_common::post::Post;
 use freenet_microblogging_common::signed_op::{
     MAX_FOLLOW_TARGETS_PER_OP, MAX_TARGET_KEY_LEN, OpType, Profile, SignedOp, USER_SHARD_CONTEXT,
 };
@@ -133,9 +133,10 @@ fn post_hash(post: &Post) -> [u8; 32] {
 /// A post is acceptable iff within the length bound, self-verifying, and authored
 /// by this shard's owner (owner-writes — ADR-0001).
 fn post_is_acceptable(post: &Post, owner_vk_hex: &str) -> bool {
-    post.content.len() <= MAX_CONTENT_LEN
-        && post.author_pubkey == owner_vk_hex
-        && post.verify().is_ok()
+    // `within_bounds` covers content AND the author name/handle. Those two are
+    // author-chosen and ride inside the signature, so a signature alone does not
+    // bound them — an owner could otherwise bloat their own shard without limit.
+    post.within_bounds() && post.author_pubkey == owner_vk_hex && post.verify().is_ok()
 }
 
 /// Deterministic "newest-first" ordering for the retention window: timestamp

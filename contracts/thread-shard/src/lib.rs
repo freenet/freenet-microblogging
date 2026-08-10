@@ -39,7 +39,7 @@
 //! duplicates, but deliberately does **not** enforce the caps: a transiently
 //! over-bound merged state is normal, and rejecting it would break convergence.
 
-use freenet_microblogging_common::post::{MAX_CONTENT_LEN, Post};
+use freenet_microblogging_common::post::Post;
 use freenet_microblogging_common::thread::{LikeRecord, QuoteRef, RepostRecord, WriterCert};
 use freenet_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -134,7 +134,10 @@ fn verify_writer_cert(_cert: Option<&WriterCert>) -> bool {
 fn reply_is_acceptable(post: &Post, root: &str) -> bool {
     !root.is_empty()
         && post.reply_to == root
-        && post.content.len() <= MAX_CONTENT_LEN
+        // Bounds author name/handle too, not just content: this is an
+        // anyone-writes surface, so an unbounded author field is a write
+        // primitive for anybody with a keypair, not just self-harm.
+        && post.within_bounds()
         && post.verify().is_ok()
         && verify_writer_cert(None)
 }
