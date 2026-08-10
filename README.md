@@ -23,15 +23,103 @@ survives every release.
 - [x] Wire posts + likes + reposts/quotes to shard contracts (user shard / thread shard)
 - [x] Public timeline: landing feed + Discover tab backed by the global-index shard
 - [x] Facade contract — stable bookmarkable URL that survives release contract-id rotation
-- [ ] Wire follows UI to the user shard (Following tab exists but empty)
+- [x] Wire follows UI to the user shard (sign → `ShardDelta::Op` → aggregated Following feed)
 - [x] Wire replies UI + delegate reply signing (`SignReply`) to the thread shard (#12; nested threads / `thread_root` still TODO)
 - [ ] Wire notifications UI to the inbox shard (contract done; UI renders mock records)
 - [ ] Handle registry: handle → pubkey resolution (no registry contract yet)
 - [ ] Real "who to follow" + search backed by the social graph / an index (currently mock/local-filter)
+- [x] Retract a post — author-signed withdrawal from the user shard and the public timeline
+- [x] Local mute list (per-reader, unreplicated)
+- [x] In-app roadmap page (voting layer planned)
 - [ ] Media attachments
+- [ ] Optional per-post translation, badged as machine-translated
 - [ ] GhostKey support for anonymous posting
 
-## Getting Started
+## Joining the network
+
+You do not need an account, an email address, or anyone's permission. You need a
+Freenet node and a browser.
+
+### 1. Run a node
+
+The app is served *by* the network, so a local node is how you reach it:
+
+```bash
+cargo install freenet
+freenet network
+```
+
+Leave it running. It connects to peers on its own and serves contracts over HTTP
+on port `7509` by default (`FREENET_NODE_PORT` overrides it).
+
+### 2. Open the app
+
+Open the URL printed when the web app is published — the node prints the full
+address, of the form `http://127.0.0.1:7509/v1/contract/web/<id>/`.
+
+Bookmark the **facade** address rather than that one. The facade is a small
+contract holding a signed pointer to the current app, so its address survives
+every release, while the app's own contract id changes each time it ships (the
+id is a hash of the bytes, so any rebuild moves it).
+
+### 3. Create an identity
+
+Type a display name and press Join. That generates an **ML-DSA-65 post-quantum
+keypair inside your node** — it is never sent anywhere, and no server is asked
+for permission.
+
+Three things follow from that, and they are worth understanding before you
+start rather than after:
+
+- **The key is the account.** There is no password, no reset, and no support
+  address. Lose it and the identity is gone; nobody can restore it for you.
+- **Posts are public and permanent.** Anyone can read them. You can *withdraw* a
+  post — your shard and the public timeline will stop serving it and will not
+  re-accept it — but nobody can reach a copy someone already fetched or holds
+  offline. Withdrawal is not deletion, and the app does not claim otherwise.
+- **Your follow list is public too.** It lives in your own shard, which anyone
+  can read.
+
+### 4. Back up your key — do this now, not later
+
+**Settings → Export key** shows a 64-character secret. Copy it somewhere safe
+and offline. Anyone holding it controls your identity; anyone without it cannot
+recover yours, including you.
+
+To use the same identity on another device, choose **Import existing identity**
+during onboarding and paste that secret.
+
+### 5. Find people
+
+- **Discover** shows the public timeline — posts whose authors opted into
+  sharing them.
+- **Follow** anyone from their post. Following is by verifying key, not by
+  handle: handles are self-declared and there is no registry yet, so two
+  accounts can display the same `@name`. The key is what is real.
+- Your **Following** feed merges your own posts with everyone you follow.
+
+### 6. When someone is a problem
+
+**Mute** hides an author's posts and replies for you. It is local, it is not
+announced, and nothing leaves your browser — which also means it does not stop
+them writing, and it does not follow you to another device yet.
+
+There is no report button and no moderator, which follows from the design: the
+network has no central operator, so there is nobody to appeal to. Writer
+credentials are the next major piece of work — see the in-app **Roadmap** for
+where that sits.
+
+### 7. Shape what gets built
+
+The app has a **Roadmap** page listing what is shipped, what is committed, and
+what is still undecided, with the trade-offs for each. A signed one-vote-per-
+identity mechanism for the undecided items is planned — until it lands, the
+buttons are visible but inert, and the honest place to argue for something is
+the issue tracker.
+
+## Getting Started (developers)
+
+Building the app yourself, rather than using a published one.
 
 ### Building and Running
 
@@ -178,3 +266,7 @@ hash as `BLAKE3(wasm_bytes)`. Both are required for the node to locate the deleg
 Licensed under the GNU Lesser General Public License v3.0 or later (LGPL-3.0-or-later). See
 [`COPYING`](COPYING) for the full GPL text and [`COPYING.LESSER`](COPYING.LESSER) for the LGPL
 additional terms.
+
+---
+
+Twitter resurrected by EXAEETH and Zuli, on Freenet — but better.
