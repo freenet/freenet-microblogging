@@ -247,9 +247,73 @@ enum Response {
 
 // Secret storage keys. The signing key is stored as its 32-byte SEED, not the
 // expanded key — `MlDsa65::from_seed` reconstructs the key deterministically.
+//
+// Every key is namespaced by the CALLING WEB APP (see `origin_key`), so each
+// caller reads and writes its own set. Two apps addressing this delegate never
+// see each other's secrets.
 const SECRET_SEED: &[u8] = b"mldsa_seed";
 const SECRET_HANDLE: &[u8] = b"handle";
 const SECRET_DISPLAY_NAME: &[u8] = b"display_name";
+
+/// Separator between the caller namespace and the key. `:` cannot occur in a
+/// hex id, so a namespaced key can never be ambiguous.
+const ORIGIN_KEY_SEPARATOR: &str = ":";
+
+/// The attested identity of whoever sent the current request.
+///
+/// `MessageOrigin::WebApp` carries the calling web app's `ContractInstanceId`,
+/// which the runtime attests — the delegate does not have to take the caller's
+/// word for who it is. Keeping it (rather than matching `WebApp(_)`) is what
+/// lets every stored secret be scoped to the app that created it.
+struct Origin(Vec<u8>);
+
+impl Origin {
+    /// Hex rather than base58 only to avoid adding a dependency to a WASM
+    /// build that pins every dep exactly; the encoding just has to be
+    /// unambiguous and stable.
+    fn to_hex(&self) -> String {
+        hex::encode(&self.0)
+    }
+}
+
+/// Namespace a secret key under the caller.
+///
+/// This is the whole isolation mechanism, and it is deliberately structural
+/// rather than a permission check: a caller cannot reach another caller's
+/// secrets because it never names them. There is no rule to remember to apply
+/// on a newly added request type — a new handler that stores something gets
+/// the same scoping for free.
+fn origin_key(origin: &Origin, key: &[u8]) -> Vec<u8> {
+    format!(
+        "{}{}{}",
+        origin.to_hex(),
+        ORIGIN_KEY_SEPARATOR,
+        String::from_utf8_lossy(key)
+    )
+    .into_bytes()
+}
+
+/// Resolve the attested caller, or refuse to act.
+///
+/// Only a web app may drive this delegate. An inter-delegate call is refused
+/// outright: `MessageOrigin::Delegate` identifies the calling delegate, not the
+/// person, so there is nobody whose identity it would be acting for. An unknown
+/// variant is refused too, so extending the enum upstream fails closed here
+/// instead of silently widening who may call.
+fn resolve_origin(origin: &Option<MessageOrigin>) -> Result<Origin, DelegateError> {
+    match origin {
+        Some(MessageOrigin::WebApp(contract_id)) => Ok(Origin(contract_id.as_bytes().to_vec())),
+        Some(MessageOrigin::Delegate(caller)) => Err(DelegateError::Other(format!(
+            "identity delegate does not accept inter-delegate calls (caller: {caller})"
+        ))),
+        None => Err(DelegateError::Other("missing message origin".into())),
+        _ => Err(DelegateError::Other(
+            "unknown MessageOrigin variant — identity delegate must be rebuilt \
+             against a newer freenet-stdlib"
+                .into(),
+        )),
+    }
+}
 
 /// Draw a fresh 32-byte ML-DSA seed from the Freenet kernel RNG.
 ///
@@ -432,11 +496,9 @@ impl DelegateInterface for IdentityDelegate {
         origin: Option<MessageOrigin>,
         message: InboundDelegateMsg,
     ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
-        // Verify origin — only accept calls from web apps.
-        match &origin {
-            Some(MessageOrigin::WebApp(_)) => {}
-            _ => return Err(DelegateError::Other("only web app calls accepted".into())),
-        }
+        // Resolve the attested caller. Every secret this request touches is
+        // scoped to it, so an app can only ever reach the identity it created.
+        let origin = resolve_origin(&origin)?;
 
         match message {
             InboundDelegateMsg::ApplicationMessage(app_msg) => {
@@ -447,8 +509,8 @@ impl DelegateInterface for IdentityDelegate {
                     Request::CreateIdentity {
                         handle,
                         display_name,
-                    } => create_identity(ctx, &handle, &display_name),
-                    Request::GetIdentity => get_identity(ctx),
+                    } => create_identity(ctx, &origin, &handle, &display_name),
+                    Request::GetIdentity => get_identity(ctx, &origin),
                     Request::SignPost {
                         nonce,
                         content,
@@ -458,6 +520,7 @@ impl DelegateInterface for IdentityDelegate {
                         quoted_post,
                     } => sign_post(
                         ctx,
+                        &origin,
                         &nonce,
                         &content,
                         &author_name,
@@ -470,18 +533,18 @@ impl DelegateInterface for IdentityDelegate {
                         root_post_id,
                         seq,
                         liked,
-                    } => sign_like(ctx, &nonce, &root_post_id, seq, liked),
+                    } => sign_like(ctx, &origin, &nonce, &root_post_id, seq, liked),
                     Request::SignRepost {
                         nonce,
                         root_post_id,
                         seq,
                         reposted,
-                    } => sign_repost(ctx, &nonce, &root_post_id, seq, reposted),
+                    } => sign_repost(ctx, &origin, &nonce, &root_post_id, seq, reposted),
                     Request::SignQuoteRef {
                         nonce,
                         root_post_id,
                         quote_post_id,
-                    } => sign_quote_ref(ctx, &nonce, &root_post_id, &quote_post_id),
+                    } => sign_quote_ref(ctx, &origin, &nonce, &root_post_id, &quote_post_id),
                     Request::SignReply {
                         nonce,
                         content,
@@ -492,6 +555,7 @@ impl DelegateInterface for IdentityDelegate {
                         quoted_post,
                     } => sign_reply(
                         ctx,
+                        &origin,
                         &nonce,
                         &content,
                         &author_name,
@@ -507,24 +571,33 @@ impl DelegateInterface for IdentityDelegate {
                         bio,
                         avatar,
                         seq,
-                    } => sign_profile(ctx, &nonce, &display_name, &handle, &bio, &avatar, seq),
+                    } => sign_profile(
+                        ctx,
+                        &origin,
+                        &nonce,
+                        &display_name,
+                        &handle,
+                        &bio,
+                        &avatar,
+                        seq,
+                    ),
                     Request::SignFollow {
                         nonce,
                         targets,
                         follow,
                         seq,
-                    } => sign_follow(ctx, &nonce, &targets, follow, seq),
+                    } => sign_follow(ctx, &origin, &nonce, &targets, follow, seq),
                     Request::SignRetract {
                         nonce,
                         post_ids,
                         seq,
                         scope,
-                    } => sign_retract(ctx, &nonce, &post_ids, seq, &scope),
-                    Request::ExportIdentity => export_identity(ctx),
+                    } => sign_retract(ctx, &origin, &nonce, &post_ids, seq, &scope),
+                    Request::ExportIdentity => export_identity(ctx, &origin),
                     Request::ImportIdentity {
                         secret_key,
                         display_name,
-                    } => import_identity(ctx, &secret_key, &display_name),
+                    } => import_identity(ctx, &origin, &secret_key, &display_name),
                 };
 
                 let response_bytes = serde_json::to_vec(&response)
@@ -545,8 +618,11 @@ impl DelegateInterface for IdentityDelegate {
 // request, to save moving a value that is immediately serialized anyway.
 #[allow(clippy::result_large_err)]
 /// Load and validate the stored seed, returning a reconstructed signing key.
-fn load_signing_key(ctx: &DelegateCtx) -> Result<MlDsaSigningKey<MlDsa65>, Response> {
-    let Some(seed_bytes) = ctx.get_secret(SECRET_SEED) else {
+fn load_signing_key(
+    ctx: &DelegateCtx,
+    origin: &Origin,
+) -> Result<MlDsaSigningKey<MlDsa65>, Response> {
+    let Some(seed_bytes) = ctx.get_secret(&origin_key(origin, SECRET_SEED)) else {
         return Err(Response::Error {
             message: "no identity found — call CreateIdentity first".to_string(),
             nonce: None,
@@ -564,19 +640,24 @@ fn load_signing_key(ctx: &DelegateCtx) -> Result<MlDsaSigningKey<MlDsa65>, Respo
     Ok(signing_key_from_seed(&seed))
 }
 
-fn stored_handle(ctx: &DelegateCtx) -> String {
-    ctx.get_secret(SECRET_HANDLE)
+fn stored_handle(ctx: &DelegateCtx, origin: &Origin) -> String {
+    ctx.get_secret(&origin_key(origin, SECRET_HANDLE))
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default()
 }
 
-fn stored_display_name(ctx: &DelegateCtx) -> String {
-    ctx.get_secret(SECRET_DISPLAY_NAME)
+fn stored_display_name(ctx: &DelegateCtx, origin: &Origin) -> String {
+    ctx.get_secret(&origin_key(origin, SECRET_DISPLAY_NAME))
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default()
 }
 
-fn create_identity(ctx: &mut DelegateCtx, handle: &str, display_name: &str) -> Response {
+fn create_identity(
+    ctx: &mut DelegateCtx,
+    origin: &Origin,
+    handle: &str,
+    display_name: &str,
+) -> Response {
     let seed = random_seed();
     let signing_key = signing_key_from_seed(&seed);
     let public_key = vk_hex(&signing_key);
@@ -587,9 +668,12 @@ fn create_identity(ctx: &mut DelegateCtx, handle: &str, display_name: &str) -> R
         handle.to_string()
     };
 
-    ctx.set_secret(SECRET_SEED, &seed);
-    ctx.set_secret(SECRET_HANDLE, handle.as_bytes());
-    ctx.set_secret(SECRET_DISPLAY_NAME, display_name.as_bytes());
+    ctx.set_secret(&origin_key(origin, SECRET_SEED), &seed);
+    ctx.set_secret(&origin_key(origin, SECRET_HANDLE), handle.as_bytes());
+    ctx.set_secret(
+        &origin_key(origin, SECRET_DISPLAY_NAME),
+        display_name.as_bytes(),
+    );
 
     Response::Identity {
         public_key,
@@ -598,20 +682,26 @@ fn create_identity(ctx: &mut DelegateCtx, handle: &str, display_name: &str) -> R
     }
 }
 
-fn get_identity(ctx: &DelegateCtx) -> Response {
-    let signing_key = match load_signing_key(ctx) {
+fn get_identity(ctx: &DelegateCtx, origin: &Origin) -> Response {
+    let signing_key = match load_signing_key(ctx, origin) {
         Ok(k) => k,
         Err(resp) => return resp,
     };
     Response::Identity {
         public_key: vk_hex(&signing_key),
-        handle: stored_handle(ctx),
-        display_name: stored_display_name(ctx),
+        handle: stored_handle(ctx, origin),
+        display_name: stored_display_name(ctx, origin),
     }
 }
 
+// The parameters mirror the fields of the corresponding wire request one for
+// one, plus the attested caller. Bundling them into a struct purely to satisfy
+// the lint would add a type whose only purpose is to be destructured again at
+// the single call site, and would hide which request fields are actually signed.
+#[allow(clippy::too_many_arguments)]
 fn sign_post(
     ctx: &DelegateCtx,
+    origin: &Origin,
     nonce: &str,
     content: &str,
     author_name: &str,
@@ -619,7 +709,7 @@ fn sign_post(
     timestamp: u64,
     quoted_post: &str,
 ) -> Response {
-    let signing_key = match load_signing_key(ctx) {
+    let signing_key = match load_signing_key(ctx, origin) {
         Ok(k) => k,
         // Re-tag the load error with this request's nonce so the UI can drop
         // exactly the stranded draft.
@@ -654,12 +744,13 @@ fn sign_post(
 
 fn sign_like(
     ctx: &DelegateCtx,
+    origin: &Origin,
     nonce: &str,
     root_post_id: &str,
     seq: u64,
     liked: bool,
 ) -> Response {
-    let signing_key = match load_signing_key(ctx) {
+    let signing_key = match load_signing_key(ctx, origin) {
         Ok(k) => k,
         // Re-tag the load error with this request's nonce so the UI can drop
         // exactly the stranded pending action.
@@ -689,12 +780,13 @@ fn sign_like(
 
 fn sign_repost(
     ctx: &DelegateCtx,
+    origin: &Origin,
     nonce: &str,
     root_post_id: &str,
     seq: u64,
     reposted: bool,
 ) -> Response {
-    let signing_key = match load_signing_key(ctx) {
+    let signing_key = match load_signing_key(ctx, origin) {
         Ok(k) => k,
         // Re-tag the load error with this request's nonce so the UI can drop
         // exactly the stranded pending action.
@@ -724,11 +816,12 @@ fn sign_repost(
 
 fn sign_quote_ref(
     ctx: &DelegateCtx,
+    origin: &Origin,
     nonce: &str,
     root_post_id: &str,
     quote_post_id: &str,
 ) -> Response {
-    let signing_key = match load_signing_key(ctx) {
+    let signing_key = match load_signing_key(ctx, origin) {
         Ok(k) => k,
         Err(Response::Error { message, .. }) => {
             return Response::Error {
@@ -753,6 +846,7 @@ fn sign_quote_ref(
 #[allow(clippy::too_many_arguments)]
 fn sign_reply(
     ctx: &DelegateCtx,
+    origin: &Origin,
     nonce: &str,
     content: &str,
     author_name: &str,
@@ -761,7 +855,7 @@ fn sign_reply(
     reply_to: &str,
     quoted_post: &str,
 ) -> Response {
-    let signing_key = match load_signing_key(ctx) {
+    let signing_key = match load_signing_key(ctx, origin) {
         Ok(k) => k,
         // Re-tag the load error with this request's nonce so the UI can drop
         // exactly the stranded pending draft.
@@ -840,8 +934,12 @@ fn signed_op_response(nonce: &str, op: SignedOp, scope: &str) -> Response {
 #[allow(clippy::result_large_err)] // see load_signing_key
 /// Load the signing key, re-tagging a load failure with this request's nonce so
 /// the UI can drop exactly the stranded pending action (mirrors `sign_like`).
-fn load_key_for(ctx: &DelegateCtx, nonce: &str) -> Result<MlDsaSigningKey<MlDsa65>, Response> {
-    match load_signing_key(ctx) {
+fn load_key_for(
+    ctx: &DelegateCtx,
+    origin: &Origin,
+    nonce: &str,
+) -> Result<MlDsaSigningKey<MlDsa65>, Response> {
+    match load_signing_key(ctx, origin) {
         Ok(k) => Ok(k),
         Err(Response::Error { message, .. }) => Err(Response::Error {
             message,
@@ -851,8 +949,14 @@ fn load_key_for(ctx: &DelegateCtx, nonce: &str) -> Result<MlDsaSigningKey<MlDsa6
     }
 }
 
+// The parameters mirror the fields of the corresponding wire request one for
+// one, plus the attested caller. Bundling them into a struct purely to satisfy
+// the lint would add a type whose only purpose is to be destructured again at
+// the single call site, and would hide which request fields are actually signed.
+#[allow(clippy::too_many_arguments)]
 fn sign_profile(
     ctx: &DelegateCtx,
+    origin: &Origin,
     nonce: &str,
     display_name: &str,
     handle: &str,
@@ -860,7 +964,7 @@ fn sign_profile(
     avatar: &str,
     seq: u64,
 ) -> Response {
-    let signing_key = match load_key_for(ctx, nonce) {
+    let signing_key = match load_key_for(ctx, origin, nonce) {
         Ok(k) => k,
         Err(resp) => return resp,
     };
@@ -899,12 +1003,13 @@ fn sign_profile(
 
 fn sign_follow(
     ctx: &DelegateCtx,
+    origin: &Origin,
     nonce: &str,
     targets: &[String],
     follow: bool,
     seq: u64,
 ) -> Response {
-    let signing_key = match load_key_for(ctx, nonce) {
+    let signing_key = match load_key_for(ctx, origin, nonce) {
         Ok(k) => k,
         Err(resp) => return resp,
     };
@@ -957,12 +1062,13 @@ fn sign_follow(
 
 fn sign_retract(
     ctx: &DelegateCtx,
+    origin: &Origin,
     nonce: &str,
     post_ids: &[String],
     seq: u64,
     scope: &str,
 ) -> Response {
-    let signing_key = match load_key_for(ctx, nonce) {
+    let signing_key = match load_key_for(ctx, origin, nonce) {
         Ok(k) => k,
         Err(resp) => return resp,
     };
@@ -1010,8 +1116,8 @@ fn sign_retract(
     signed_op_response(nonce, op, scope)
 }
 
-fn export_identity(ctx: &DelegateCtx) -> Response {
-    let Some(seed_bytes) = ctx.get_secret(SECRET_SEED) else {
+fn export_identity(ctx: &DelegateCtx, origin: &Origin) -> Response {
+    let Some(seed_bytes) = ctx.get_secret(&origin_key(origin, SECRET_SEED)) else {
         return Response::Error {
             message: "no identity to export".to_string(),
             nonce: None,
@@ -1030,12 +1136,17 @@ fn export_identity(ctx: &DelegateCtx) -> Response {
     Response::ExportedIdentity {
         secret_key: hex::encode(seed),
         public_key: vk_hex(&signing_key),
-        display_name: stored_display_name(ctx),
-        handle: stored_handle(ctx),
+        display_name: stored_display_name(ctx, origin),
+        handle: stored_handle(ctx, origin),
     }
 }
 
-fn import_identity(ctx: &mut DelegateCtx, secret_key_hex: &str, display_name: &str) -> Response {
+fn import_identity(
+    ctx: &mut DelegateCtx,
+    origin: &Origin,
+    secret_key_hex: &str,
+    display_name: &str,
+) -> Response {
     let seed: [u8; MLDSA_SEED_LEN] = match hex::decode(secret_key_hex) {
         Ok(bytes) => match bytes.try_into() {
             Ok(arr) => arr,
@@ -1058,9 +1169,12 @@ fn import_identity(ctx: &mut DelegateCtx, secret_key_hex: &str, display_name: &s
     let public_key = vk_hex(&signing_key);
     let handle = public_key[..8].to_string();
 
-    ctx.set_secret(SECRET_SEED, &seed);
-    ctx.set_secret(SECRET_HANDLE, handle.as_bytes());
-    ctx.set_secret(SECRET_DISPLAY_NAME, display_name.as_bytes());
+    ctx.set_secret(&origin_key(origin, SECRET_SEED), &seed);
+    ctx.set_secret(&origin_key(origin, SECRET_HANDLE), handle.as_bytes());
+    ctx.set_secret(
+        &origin_key(origin, SECRET_DISPLAY_NAME),
+        display_name.as_bytes(),
+    );
 
     Response::Identity {
         public_key,
@@ -1622,7 +1736,7 @@ mod test {
         assert_eq!(op.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_A)), Ok(()));
 
         // op_type rides in the signed payload, so flipping it breaks the
-        // signature — an attacker cannot turn a follow into an unfollow.
+        // signature — a follow cannot be replayed as an unfollow.
         op.op_type = OpType::Unfollow;
         assert_eq!(
             op.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_A)),
@@ -1756,5 +1870,77 @@ mod test {
             USER_SHARD_CONTEXT,
         );
         assert_eq!(decode_id_list(&op.payload), ids);
+    }
+
+    // -- caller scoping --
+    //
+    // The delegate is reachable by any web app on the node, so every stored
+    // secret is namespaced by the attested caller. These tests pin the two
+    // properties that makes rest on: distinct callers never collide, and the
+    // same caller is stable across requests.
+
+    fn origin_of(bytes: [u8; 32]) -> Origin {
+        Origin(bytes.to_vec())
+    }
+
+    #[test]
+    fn different_callers_get_different_secret_keys() {
+        let a = origin_of([1u8; 32]);
+        let b = origin_of([2u8; 32]);
+        assert_ne!(
+            origin_key(&a, SECRET_SEED),
+            origin_key(&b, SECRET_SEED),
+            "two apps would share a seed slot"
+        );
+    }
+
+    #[test]
+    fn the_same_caller_is_stable_across_calls() {
+        // If this were not stable an app would lose its own identity between
+        // requests, which is the failure mode that tempts people to widen the
+        // scoping until it does nothing.
+        let a = origin_of([7u8; 32]);
+        assert_eq!(origin_key(&a, SECRET_SEED), origin_key(&a, SECRET_SEED));
+    }
+
+    #[test]
+    fn each_secret_is_distinct_within_one_caller() {
+        let a = origin_of([7u8; 32]);
+        let seed = origin_key(&a, SECRET_SEED);
+        let handle = origin_key(&a, SECRET_HANDLE);
+        let name = origin_key(&a, SECRET_DISPLAY_NAME);
+        assert_ne!(seed, handle);
+        assert_ne!(handle, name);
+        assert_ne!(seed, name);
+    }
+
+    #[test]
+    fn a_namespaced_key_cannot_be_confused_with_another() {
+        // The separator must not be producible from the id encoding, or one
+        // caller could craft a key that resolves into another's namespace.
+        let a = origin_of([0xABu8; 32]);
+        let key = String::from_utf8(origin_key(&a, SECRET_SEED)).unwrap();
+        assert!(key.starts_with(&a.to_hex()));
+        assert_eq!(key.matches(ORIGIN_KEY_SEPARATOR).count(), 1);
+        // hex ids contain no separator, so the split point is unambiguous
+        assert!(!a.to_hex().contains(ORIGIN_KEY_SEPARATOR));
+    }
+
+    #[test]
+    fn only_a_web_app_may_drive_the_delegate() {
+        use freenet_stdlib::prelude::ContractInstanceId;
+        let app = ContractInstanceId::new([5u8; 32]);
+        assert!(resolve_origin(&Some(MessageOrigin::WebApp(app))).is_ok());
+        // No origin at all: nothing to scope to, so nothing may be done.
+        assert!(resolve_origin(&None).is_err());
+    }
+
+    #[test]
+    fn an_inter_delegate_call_is_refused() {
+        // A delegate caller identifies the delegate, not a person — there is no
+        // identity it would be acting for, so acting at all is wrong.
+        let caller = DelegateKey::from_params("x", &Parameters::from(vec![]))
+            .expect("build a delegate key for the test");
+        assert!(resolve_origin(&Some(MessageOrigin::Delegate(caller))).is_err());
     }
 }
