@@ -43,7 +43,9 @@
 //!   best-effort lossy, the same trade-off as the post window.
 
 use freenet_microblogging_common::post::{MAX_CONTENT_LEN, Post};
-use freenet_microblogging_common::signed_op::{OpType, Profile, SignedOp, USER_SHARD_CONTEXT};
+use freenet_microblogging_common::signed_op::{
+    MAX_FOLLOW_TARGETS_PER_OP, MAX_TARGET_KEY_LEN, OpType, Profile, SignedOp, USER_SHARD_CONTEXT,
+};
 use freenet_stdlib::prelude::{
     blake3::{Hasher as Blake3, traits::digest::Digest},
     *,
@@ -59,14 +61,6 @@ const MAX_POSTS: usize = 200;
 /// owner-writes surface). Enforced post-merge in `validate_state` (transient
 /// over-bound during merge is tolerated, mirroring the post window).
 const MAX_FOLLOWS: usize = 5_000;
-
-/// Cap on targets a single follow/unfollow op may carry, so one op cannot
-/// blow the follow set in a single write.
-const MAX_FOLLOW_TARGETS_PER_OP: usize = 1_000;
-
-/// Maximum length of a followed-key hex string (an ML-DSA-65 VK is 1952 bytes →
-/// 3904 hex chars). Rejects malformed/oversized target strings.
-const MAX_TARGET_KEY_LEN: usize = 3904;
 
 /// Per-key follow record: the `seq` of the op that last touched this key and
 /// whether that op was a Follow (`true`) or an Unfollow (`false`). Merge keeps

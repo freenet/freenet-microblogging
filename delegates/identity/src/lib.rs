@@ -1,5 +1,8 @@
 #![allow(unexpected_cfgs)]
 use freenet_microblogging_common::post::Post;
+use freenet_microblogging_common::signed_op::{
+    MAX_FOLLOW_TARGETS_PER_OP, MAX_TARGET_KEY_LEN, OpType, Profile, SignedOp, USER_SHARD_CONTEXT,
+};
 use freenet_microblogging_common::thread::{LikeRecord, QuoteRef, RepostRecord};
 use freenet_stdlib::prelude::*;
 use ml_dsa::signature::{Keypair, Signer};
@@ -94,6 +97,35 @@ enum Request {
         #[serde(default)]
         quoted_post: String,
     },
+    /// Sign a profile-update op for the owner's user shard. The delegate
+    /// assembles the canonical [`Profile`] payload and the `SignedOp` signing
+    /// bytes itself (the single trusted encoder, `common::signed_op`), bound to
+    /// `USER_SHARD_CONTEXT`, so the browser never builds signed bytes. `seq` is
+    /// the owner's monotonic counter — the shard resolves concurrent profile
+    /// writes last-write-wins by it, so it must strictly increase per update.
+    /// `nonce` is echoed back so the UI can match the response.
+    SignProfile {
+        nonce: String,
+        display_name: String,
+        handle: String,
+        #[serde(default)]
+        bio: String,
+        #[serde(default)]
+        avatar: String,
+        seq: u64,
+    },
+    /// Sign a follow (or unfollow) op for the owner's user shard. `targets` is
+    /// the list of hex-encoded ML-DSA-65 verifying keys to add or remove;
+    /// `follow` picks `OpType::Follow` (true) or `OpType::Unfollow` (false).
+    /// The shard merges per key by highest `seq`, so a later unfollow of the
+    /// same key must carry a higher `seq` than the follow it reverses.
+    /// `nonce` is echoed back so the UI can match the response.
+    SignFollow {
+        nonce: String,
+        targets: Vec<String>,
+        follow: bool,
+        seq: u64,
+    },
     /// Export the secret seed for backup/migration.
     ExportIdentity,
     /// Import a secret seed + identity from another device.
@@ -161,6 +193,19 @@ enum Response {
         post_id: String,    // content-addressed id = blake3(signing payload)
         signature: String,  // hex-encoded ML-DSA-65 signature (3309 bytes)
         public_key: String, // hex-encoded VK
+    },
+    /// A signed [`SignedOp`] ready to fold into the owner's user shard via
+    /// `ShardDelta::Op`. `payload` is hex-encoded because the op payload is
+    /// opaque bytes built *here* — the UI only relays it back into the delta it
+    /// PUTs, it never assembles it. `nonce` is echoed; the remaining fields
+    /// reconstruct the exact signed op.
+    SignedShardOp {
+        nonce: String,
+        op_type: OpType,
+        payload: String, // hex-encoded op payload bytes
+        seq: u64,
+        signer_pubkey: String, // hex-encoded VK
+        signature: String,     // hex-encoded ML-DSA-65 signature
     },
     ExportedIdentity {
         secret_key: String, // hex-encoded 32-byte secret seed
@@ -432,6 +477,20 @@ impl DelegateInterface for IdentityDelegate {
                         &reply_to,
                         &quoted_post,
                     ),
+                    Request::SignProfile {
+                        nonce,
+                        display_name,
+                        handle,
+                        bio,
+                        avatar,
+                        seq,
+                    } => sign_profile(ctx, &nonce, &display_name, &handle, &bio, &avatar, seq),
+                    Request::SignFollow {
+                        nonce,
+                        targets,
+                        follow,
+                        seq,
+                    } => sign_follow(ctx, &nonce, &targets, follow, seq),
                     Request::ExportIdentity => export_identity(ctx),
                     Request::ImportIdentity {
                         secret_key,
@@ -703,6 +762,157 @@ fn sign_reply(
     }
 }
 
+/// Build + sign a [`SignedOp`] for the user shard from an already-encoded
+/// payload. Single place where an op signature is produced: it fills
+/// `signer_pubkey` from the loaded key, signs
+/// [`SignedOp::signing_payload`] under [`USER_SHARD_CONTEXT`], and returns the
+/// op with its signature attached.
+///
+/// The payload bytes are built by the caller *inside this delegate* (never by
+/// the browser), because `signing_payload` covers them verbatim — the contract
+/// trusts the payload precisely because it rode inside the owner's signature.
+fn build_signed_op(
+    signing_key: &MlDsaSigningKey<MlDsa65>,
+    op_type: OpType,
+    payload: Vec<u8>,
+    seq: u64,
+) -> SignedOp {
+    let mut op = SignedOp {
+        op_type,
+        payload,
+        seq,
+        signer_pubkey: vk_hex(signing_key),
+        signature: None,
+    };
+    let signature: ml_dsa::Signature<MlDsa65> =
+        signing_key.sign(&op.signing_payload(USER_SHARD_CONTEXT));
+    op.signature = Some(hex::encode(signature.encode()));
+    op
+}
+
+/// Turn a signed op into the wire response, hex-encoding the opaque payload.
+fn signed_op_response(nonce: &str, op: SignedOp) -> Response {
+    Response::SignedShardOp {
+        nonce: nonce.to_string(),
+        op_type: op.op_type,
+        payload: hex::encode(&op.payload),
+        seq: op.seq,
+        signer_pubkey: op.signer_pubkey,
+        signature: op.signature.unwrap_or_default(),
+    }
+}
+
+/// Load the signing key, re-tagging a load failure with this request's nonce so
+/// the UI can drop exactly the stranded pending action (mirrors `sign_like`).
+fn load_key_for(ctx: &DelegateCtx, nonce: &str) -> Result<MlDsaSigningKey<MlDsa65>, Response> {
+    match load_signing_key(ctx) {
+        Ok(k) => Ok(k),
+        Err(Response::Error { message, .. }) => Err(Response::Error {
+            message,
+            nonce: Some(nonce.to_string()),
+        }),
+        Err(resp) => Err(resp),
+    }
+}
+
+fn sign_profile(
+    ctx: &DelegateCtx,
+    nonce: &str,
+    display_name: &str,
+    handle: &str,
+    bio: &str,
+    avatar: &str,
+    seq: u64,
+) -> Response {
+    let signing_key = match load_key_for(ctx, nonce) {
+        Ok(k) => k,
+        Err(resp) => return resp,
+    };
+
+    let profile = Profile {
+        display_name: display_name.to_string(),
+        handle: handle.to_string(),
+        bio: bio.to_string(),
+        avatar: avatar.to_string(),
+    };
+    // Reject over-bound fields here rather than emitting a signature the shard
+    // will silently drop in `apply_op` — a dropped op is indistinguishable from
+    // a lost write at the UI, so fail loudly at the only point that still can.
+    if !profile.within_bounds() {
+        return Response::Error {
+            message: "profile field exceeds its length bound".to_string(),
+            nonce: Some(nonce.to_string()),
+        };
+    }
+    let Ok(payload) = serde_json::to_vec(&profile) else {
+        return Response::Error {
+            message: "could not encode profile payload".to_string(),
+            nonce: Some(nonce.to_string()),
+        };
+    };
+
+    let op = build_signed_op(&signing_key, OpType::Profile, payload, seq);
+    signed_op_response(nonce, op)
+}
+
+fn sign_follow(
+    ctx: &DelegateCtx,
+    nonce: &str,
+    targets: &[String],
+    follow: bool,
+    seq: u64,
+) -> Response {
+    let signing_key = match load_key_for(ctx, nonce) {
+        Ok(k) => k,
+        Err(resp) => return resp,
+    };
+
+    // The shard rejects an over-cap batch outright (fail closed, never
+    // truncate), so signing one would produce a silently-dropped write.
+    if targets.len() > MAX_FOLLOW_TARGETS_PER_OP {
+        return Response::Error {
+            message: format!(
+                "follow op carries {} targets, over the {MAX_FOLLOW_TARGETS_PER_OP} cap",
+                targets.len()
+            ),
+            nonce: Some(nonce.to_string()),
+        };
+    }
+    if targets.is_empty() {
+        return Response::Error {
+            message: "follow op carries no targets".to_string(),
+            nonce: Some(nonce.to_string()),
+        };
+    }
+    // An over-long target is skipped per-key by the shard, so the op would still
+    // apply — but only partially, and the UI would show a follow that never
+    // landed. Reject up front so the caller learns which write is impossible.
+    if let Some(bad) = targets.iter().find(|t| t.len() > MAX_TARGET_KEY_LEN) {
+        return Response::Error {
+            message: format!(
+                "follow target exceeds {MAX_TARGET_KEY_LEN} hex chars: {} chars",
+                bad.len()
+            ),
+            nonce: Some(nonce.to_string()),
+        };
+    }
+
+    let Ok(payload) = serde_json::to_vec(targets) else {
+        return Response::Error {
+            message: "could not encode follow payload".to_string(),
+            nonce: Some(nonce.to_string()),
+        };
+    };
+
+    let op_type = if follow {
+        OpType::Follow
+    } else {
+        OpType::Unfollow
+    };
+    let op = build_signed_op(&signing_key, op_type, payload, seq);
+    signed_op_response(nonce, op)
+}
+
 fn export_identity(ctx: &DelegateCtx) -> Response {
     let Some(seed_bytes) = ctx.get_secret(SECRET_SEED) else {
         return Response::Error {
@@ -784,6 +994,7 @@ mod test {
     //! divergence between signer and verifier fails here rather than on-network.
     use super::*;
     use freenet_microblogging_common::post::VerifyError as PostVerifyError;
+    use freenet_microblogging_common::signed_op::VerifyError as OpVerifyError;
     use freenet_microblogging_common::thread::VerifyError as ThreadVerifyError;
 
     const SEED_A: [u8; MLDSA_SEED_LEN] = [7u8; MLDSA_SEED_LEN];
@@ -1233,5 +1444,158 @@ mod test {
         // Both still verify independently.
         assert_eq!(top_post.verify(), Ok(()));
         assert_eq!(reply.verify(), Ok(()));
+    }
+
+    // -- SignedOp (profile / follow) tests --
+    //
+    // Same discipline as the post/like tests: build the op with the delegate's
+    // own helper, then verify it with the SAME `common::signed_op` code the
+    // user-shard contract runs in `apply_op`. A divergence between what the
+    // delegate signs and what the shard accepts fails here, not on-network
+    // (where an unverifiable op is silently dropped and looks like a lost write).
+
+    /// The owner VK hex the shard derives from its parameters, for a given seed.
+    fn owner_hex(seed: &[u8; MLDSA_SEED_LEN]) -> String {
+        vk_hex(&signing_key_from_seed(seed))
+    }
+
+    #[test]
+    fn signed_profile_op_verifies_under_common() {
+        let sk = signing_key_from_seed(&SEED_A);
+        let profile = Profile {
+            display_name: "Alice".into(),
+            handle: "@alice".into(),
+            bio: "builds things".into(),
+            avatar: "#3b82f6".into(),
+        };
+        let payload = serde_json::to_vec(&profile).expect("encode profile");
+        let op = build_signed_op(&sk, OpType::Profile, payload, 7);
+
+        // Verifies for this owner, under the user-shard context.
+        assert_eq!(op.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_A)), Ok(()));
+        // The payload round-trips to the same profile the shard will decode.
+        let decoded: Profile = serde_json::from_slice(&op.payload).expect("decode profile");
+        assert_eq!(decoded, profile);
+        assert!(decoded.within_bounds());
+        assert_eq!(op.seq, 7);
+    }
+
+    #[test]
+    fn signed_follow_op_verifies_and_carries_targets() {
+        let sk = signing_key_from_seed(&SEED_A);
+        let targets = vec![owner_hex(&SEED_B), "ab".repeat(8)];
+        let payload = serde_json::to_vec(&targets).expect("encode targets");
+        let op = build_signed_op(&sk, OpType::Follow, payload, 3);
+
+        assert_eq!(op.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_A)), Ok(()));
+        let decoded: Vec<String> = serde_json::from_slice(&op.payload).expect("decode targets");
+        assert_eq!(decoded, targets);
+    }
+
+    #[test]
+    fn signed_op_rejects_non_owner() {
+        let sk = signing_key_from_seed(&SEED_A);
+        let op = build_signed_op(&sk, OpType::Follow, b"[]".to_vec(), 1);
+        // Owner-writes: a shard parameterized by a different VK must reject it.
+        assert_eq!(
+            op.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_B)),
+            Err(OpVerifyError::NotOwner)
+        );
+    }
+
+    #[test]
+    fn signed_op_does_not_verify_in_foreign_context() {
+        use freenet_microblogging_common::signed_op::INBOX_SHARD_CONTEXT;
+        let sk = signing_key_from_seed(&SEED_A);
+        let op = build_signed_op(&sk, OpType::Profile, b"{}".to_vec(), 1);
+
+        // Bound to the user shard: replaying it into the inbox shard must fail.
+        assert_eq!(op.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_A)), Ok(()));
+        assert_eq!(
+            op.verify(INBOX_SHARD_CONTEXT, &owner_hex(&SEED_A)),
+            Err(OpVerifyError::SignatureInvalid)
+        );
+    }
+
+    #[test]
+    fn signed_follow_cannot_be_replayed_as_unfollow() {
+        let sk = signing_key_from_seed(&SEED_A);
+        let targets = serde_json::to_vec(&vec![owner_hex(&SEED_B)]).expect("encode");
+        let mut op = build_signed_op(&sk, OpType::Follow, targets, 5);
+        assert_eq!(op.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_A)), Ok(()));
+
+        // op_type rides in the signed payload, so flipping it breaks the
+        // signature — an attacker cannot turn a follow into an unfollow.
+        op.op_type = OpType::Unfollow;
+        assert_eq!(
+            op.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_A)),
+            Err(OpVerifyError::SignatureInvalid)
+        );
+    }
+
+    #[test]
+    fn signed_op_seq_and_payload_are_bound() {
+        let sk = signing_key_from_seed(&SEED_A);
+        let base = build_signed_op(&sk, OpType::Profile, b"{}".to_vec(), 1);
+
+        // seq is in the signed payload: bumping it to win a last-write-wins
+        // race against the real owner must not verify.
+        let mut bumped = SignedOp {
+            seq: 99,
+            ..base.clone()
+        };
+        assert_eq!(
+            bumped.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_A)),
+            Err(OpVerifyError::SignatureInvalid)
+        );
+
+        // payload is signed verbatim: swapping it must not verify either.
+        bumped = SignedOp {
+            payload: br#"{"display_name":"Mallory"}"#.to_vec(),
+            ..base.clone()
+        };
+        assert_eq!(
+            bumped.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_A)),
+            Err(OpVerifyError::SignatureInvalid)
+        );
+    }
+
+    #[test]
+    fn signed_op_and_post_payloads_are_domain_separated() {
+        // A `SignedOp` payload and a `Post` payload can never collide: the op
+        // carries SIGNED_OP_DOMAIN_TAG, the post carries its own tag.
+        let sk = signing_key_from_seed(&SEED_A);
+        let op = build_signed_op(&sk, OpType::Profile, b"x".to_vec(), 1);
+        let post = build_signed_post(&sk, "x", "Alice", "@alice", 1, "");
+        assert_ne!(
+            op.signing_payload(USER_SHARD_CONTEXT),
+            post.signing_payload()
+        );
+    }
+
+    #[test]
+    fn signed_op_response_hex_round_trips_payload() {
+        let sk = signing_key_from_seed(&SEED_A);
+        let payload = serde_json::to_vec(&vec!["deadbeef".to_string()]).expect("encode");
+        let op = build_signed_op(&sk, OpType::Unfollow, payload.clone(), 2);
+        let resp = signed_op_response("n-1", op);
+
+        // The UI relays `payload` back verbatim into the delta it PUTs, so the
+        // hex must decode to exactly the bytes that were signed.
+        match resp {
+            Response::SignedShardOp {
+                nonce,
+                payload: hex_payload,
+                seq,
+                signature,
+                ..
+            } => {
+                assert_eq!(nonce, "n-1");
+                assert_eq!(hex::decode(hex_payload).expect("hex"), payload);
+                assert_eq!(seq, 2);
+                assert!(!signature.is_empty());
+            }
+            _ => panic!("expected a SignedShardOp response"),
+        }
     }
 }

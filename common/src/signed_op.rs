@@ -180,6 +180,19 @@ pub const MAX_HANDLE_LEN: usize = 32;
 pub const MAX_BIO_LEN: usize = 280;
 pub const MAX_AVATAR_LEN: usize = 64;
 
+/// Cap on how many targets a single [`OpType::Follow`] / [`OpType::Unfollow`] op
+/// may carry, so one op cannot blow the follow set in a single write. The user
+/// shard rejects an over-cap op outright (fail closed, never truncate), so a
+/// signer that exceeds this produces a signature the contract silently drops —
+/// which is why it lives here, shared by the contract and the delegate that
+/// builds the op, rather than being restated on each side.
+pub const MAX_FOLLOW_TARGETS_PER_OP: usize = 1_000;
+
+/// Maximum length of a followed-key hex string. An ML-DSA-65 verifying key is
+/// 1952 bytes → 3904 hex chars. Over-long targets are skipped per-key (the op
+/// itself still applies), so this is a per-target filter, not a fail-closed cap.
+pub const MAX_TARGET_KEY_LEN: usize = 3904;
+
 impl Profile {
     /// Whether every field is within its bound.
     pub fn within_bounds(&self) -> bool {
