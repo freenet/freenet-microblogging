@@ -11,7 +11,16 @@ node_modules/
 # Facade loader is rendered per-publish from src/index.html.tmpl with the
 # current_app_id baked in (issue #45) — the rendered dist/ is an artifact.
 contracts/facade-loader/dist/
-web/dist/
+# Ignore the directory's CONTENTS rather than the directory itself: git will not
+# descend into an excluded directory, so a `!` exception inside one never takes
+# effect. This is what lets the signed loader below stay tracked.
+web/dist/*
+# ...except the signed loader, which IS tracked: scripts/node-e2e.sh and
+# multi-node-e2e.sh snapshot and restore it around a run, so it is part of the
+# release artifact set rather than build output. It was already tracked while
+# also matching the rule above — git keeps tracked files regardless, but the
+# rule made `git add -A` after a build ambiguous.
+!web/dist/index.html
 web/delegate_key.txt
 web/delegate_key_bytes.json
 web/delegate_code_hash_bytes.json
@@ -21,7 +30,14 @@ web/thread_shard_code_hash.txt
 web/public/thread_shard.wasm
 web/global_index_shard_code_hash.txt
 web/public/global_index_shard.wasm
+web/inbox_shard_code_hash.txt
+web/public/inbox_shard.wasm
 web/model_code_hash.txt
+# Catch-all for the same class of artifact: every shard mirrors its raw wasm
+# into web/public/ at build time. Listing them one by one meant a new shard was
+# untracked noise until someone remembered to add it (the inbox shard was).
+web/public/*.wasm
+web/*_code_hash.txt
 
 # Playwright
 web/tests/node_modules/
@@ -46,3 +62,66 @@ Thumbs.db
 # Claude local settings
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+
+# ---------------------------------------------------------------------------
+# Secrets — never in a public repo
+# ---------------------------------------------------------------------------
+# The release signing key normally lives in ~/.config/freenet-microblogging/,
+# but WEB_CONTAINER_KEY_FILE can point anywhere, including here. A key that
+# leaks cannot be un-leaked: anyone holding it can sign a release users' nodes
+# will accept as authentic.
+web-container-keys.toml
+# ...except the TEST signing key, which is committed on purpose so anyone can
+# build and sign a local test webapp without generating one. It is not the
+# production key: a test-signed webapp carries different parameters, so it
+# derives a different contract id and cannot stand in for the released app.
+# Production signing uses $HOME/.config/freenet-microblogging/ (or
+# WEB_CONTAINER_KEY_FILE) and must never be committed.
+!test-contract/web-container-keys.toml
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# Environment / local configuration
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------------------
+# Local development noise
+# ---------------------------------------------------------------------------
+# A node run from inside the checkout writes its data and logs here.
+.freenet/
+freenet-data/
+*.log
+logs/
+
+# Patches and scratch files from local work — useful locally, meaningless to
+# anyone else, and easy to `git add -A` by accident.
+*.patch
+*.orig
+*.rej
+*.bak
+*~
+
+# Coverage / profiling output
+coverage/
+lcov.info
+*.profraw
+*.profdata
+tarpaulin-report.html
+
+# Editors and tooling not already covered
+*.sublime-workspace
+.direnv/
+.nvmrc.local
+
+# OS
+Desktop.ini
+$RECYCLE.BIN/
+._*
+.Spotlight-V100
+.Trashes
