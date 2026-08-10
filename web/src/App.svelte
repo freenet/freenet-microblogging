@@ -37,6 +37,7 @@
   import Explore from "./components/Explore.svelte";
   import Notifications from "./components/Notifications.svelte";
   import Profile from "./components/Profile.svelte";
+  import Roadmap from "./components/Roadmap.svelte";
   import Settings from "./components/Settings.svelte";
   import Thread from "./components/Thread.svelte";
   import ComposeModal from "./components/ComposeModal.svelte";
@@ -192,6 +193,8 @@
           onOpen={(post) => openThread(post)}
           onSettings={() => navigate("settings")}
         />
+      {:else if currentView === "roadmap"}
+        <Roadmap />
       {:else if currentView === "settings"}
         <Settings />
       {/if}
