@@ -15,6 +15,7 @@
     identity,
     posts,
     globalPosts,
+    followingPosts,
     threadReplies,
     keyExportSecret,
     publish,
@@ -50,9 +51,15 @@
   // Compose modal control (was app.ts openCompose / openComposeModal).
   let composeState = $state<{ open: boolean; quoted?: Post }>({ open: false });
 
-  // Follow set — app.ts kept a (currently always-empty) followedPubkeys set
-  // and passed it through to Feed/PostCard for the following-note affordances.
-  const followedPubkeys = new Set<string>();
+  // The Following feed: the owner's own posts plus every followed user's,
+  // newest first. Own posts are included because a feed that hides your own
+  // writing reads as broken — and because a fresh account follows nobody, so
+  // the tab would otherwise be permanently empty.
+  const followingFeed = $derived(
+    [...$posts, ...$followingPosts].sort(
+      (a, b) => b.timestamp.getTime() - a.timestamp.getTime(),
+    ),
+  );
 
   // Thread replies: sourced from the thread-shard replies store (keyed by root
   // post id), which is populated by onRepliesUpdated whenever the thread shard
@@ -151,9 +158,8 @@
         />
       {:else if currentView === "feed"}
         <Feed
-          posts={$posts}
+          posts={followingFeed}
           discoverPosts={$globalPosts}
-          {followedPubkeys}
           onCompose={() => openCompose()}
           onOpen={(post) => openThread(post)}
           onLike={(postId, liked) => like(postId, liked)}

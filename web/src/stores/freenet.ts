@@ -71,6 +71,16 @@ export const keyExportSecret = writable<string | null>(null);
  */
 export const threadReplies = writable<Map<string, Post[]>>(new Map());
 
+/**
+ * Hex VKs the signed-in owner follows, from their own user shard. Replaced (not
+ * merged) on every emit: an unfollow is a tombstone in the contract, so merging
+ * would never drop anyone from the UI.
+ */
+export const follows = writable<Set<string>>(new Set());
+
+/** Aggregated Following feed: posts from every followed user's shard. */
+export const followingPosts = writable<Post[]>([]);
+
 // ---------------------------------------------------------------------------
 // Module-private latches / dedup sets (plain `let`/`const`, NOT stores) —
 // these mirror index.ts exactly.
@@ -245,6 +255,12 @@ export const connection = new FreenetConnection({
       return [...cur];
     });
   },
+  onFollowsUpdated: ({ following }: { following: Set<string> }) => {
+    follows.set(following);
+  },
+  onFollowingPostsLoaded: (list: Post[]) => {
+    followingPosts.set(list);
+  },
   onDelegateResponse: (response: DelegateResponse) => {
     const payloads = parseDelegateResponse(response);
     for (const payload of payloads) {
@@ -401,6 +417,40 @@ export const connection = new FreenetConnection({
         return;
       }
 
+      // A signed profile/follow op: fold it into the owner's user shard. The
+      // payload rides back hex-encoded and is relayed verbatim — see
+      // completeShardOp for why it is never re-encoded here.
+      const signedOp = payload as {
+        type?: string;
+        nonce?: string;
+        op_type?: string;
+        payload?: string;
+        seq?: number;
+        signer_pubkey?: string;
+        signature?: string;
+      };
+      if (
+        signedOp.type === "SignedShardOp" &&
+        signedOp.nonce &&
+        signedOp.op_type &&
+        typeof signedOp.payload === "string" &&
+        typeof signedOp.seq === "number" &&
+        signedOp.signer_pubkey &&
+        signedOp.signature
+      ) {
+        connection
+          .completeShardOp({
+            nonce: signedOp.nonce,
+            op_type: signedOp.op_type,
+            payload: signedOp.payload,
+            seq: signedOp.seq,
+            signer_pubkey: signedOp.signer_pubkey,
+            signature: signedOp.signature,
+          })
+          .catch((e) => console.error("[delegate] completeShardOp failed:", e));
+        return;
+      }
+
       // Check for an error from the delegate.
       const p = payload as { type?: string; message?: string; nonce?: string };
       if (p.type === "Error") {
@@ -412,6 +462,7 @@ export const connection = new FreenetConnection({
           if (connection.dropPendingRepost(p.nonce)) refreshFeed();
           connection.dropPendingQuoteRef(p.nonce);
           connection.dropPendingReply(p.nonce);
+          connection.dropPendingShardOp(p.nonce);
         }
         if (p.message?.includes("no identity")) {
           console.log("[identity] No identity in delegate — show onboarding");
@@ -531,6 +582,31 @@ export function reply(rootPostId: string, content: string): void {
  * populated even on a fresh page load (before any engagement action). Mirrors
  * the like/repost pattern: fire-and-forget, errors are logged in the connection.
  */
+/**
+ * Follow or unfollow a user by their hex ML-DSA-65 verifying key. The write
+ * lands on the CALLER'S own shard (the follow set is owner state), so there is
+ * no foreign shard to instantiate. The authoritative set comes back via
+ * onFollowsUpdated once the op merges — no optimistic toggle here, because a
+ * rejected op is silent and the UI would otherwise show a follow that never was.
+ */
+export function follow(targetVkHex: string, following: boolean): void {
+  connection
+    .followUser(targetVkHex, following)
+    .catch((e) => console.error("[follows] follow failed:", e));
+}
+
+/** Update the owner's profile register (display name / handle / bio / avatar). */
+export function saveProfile(
+  displayName: string,
+  handle: string,
+  bio = "",
+  avatar = "",
+): void {
+  connection
+    .updateProfile(displayName, handle, bio, avatar)
+    .catch((e) => console.error("[profile] update failed:", e));
+}
+
 export function loadThreadReplies(rootPostId: string): void {
   connection.loadThreadReplies(rootPostId);
 }

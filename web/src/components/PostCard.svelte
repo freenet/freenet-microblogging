@@ -2,6 +2,7 @@
   import type { Post } from "../types";
   import { formatRelativeTime } from "../utils";
   import { openRepostMenu } from "./repost-menu";
+  import { follows, identity, follow } from "../stores/freenet";
 
   interface Props {
     post: Post;
@@ -23,6 +24,13 @@
     onOpen,
     lead = false,
   }: Props = $props();
+
+  // A post can only be followed if it carries its author's verifying key (the
+  // shard parameter). Mock/offline posts have none — no key, no follow button.
+  const authorKey = $derived(post.author.publicKey ?? "");
+  const isSelf = $derived(!!authorKey && authorKey === $identity?.publicKey);
+  const canFollow = $derived(!!authorKey && !isSelf && !!$identity?.publicKey);
+  const isFollowed = $derived($follows.has(authorKey));
 
   function getInitials(displayName: string): string {
     return displayName
@@ -122,6 +130,22 @@
       <span class="post__name">{post.author.displayName}</span>
       <span class="post__when">@{post.author.handle}<i>·</i>{formatRelativeTime(post.timestamp)}</span>
     </div>
+    {#if canFollow}
+      <button
+        class="post__follow"
+        class:post__follow--on={isFollowed}
+        title={isFollowed
+          ? "Unfollow — signed by your key, recorded on your own shard"
+          : "Follow — signed by your key, recorded on your own shard"}
+        onclick={(e) => {
+          // The byline sits inside the card's open-thread click target.
+          e.stopPropagation();
+          follow(authorKey, !isFollowed);
+        }}
+      >
+        {isFollowed ? "Following" : "Follow"}
+      </button>
+    {/if}
   </div>
 
   <p class={lead ? "post__text post__text--lead" : "post__text"}>{post.content}</p>

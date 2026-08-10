@@ -181,6 +181,40 @@
   min-width: 0;
 }
 
+// Follow / Following toggle in the byline. `margin-left:auto` pushes it to the
+// trailing edge so it never crowds a long display name.
+.post__follow {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 5px 13px;
+  border-radius: 999px;
+  border: 1.5px solid var(--accent-mid);
+  background: transparent;
+  color: var(--accent);
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+
+  &:hover {
+    background: var(--accent-bg);
+  }
+
+  // Already following: quieter by default, and the hover state previews the
+  // destructive action (unfollow) rather than repeating the current state.
+  &--on {
+    border-color: var(--line);
+    color: var(--ink-3);
+
+    &:hover {
+      border-color: var(--accent-mid);
+      color: var(--accent);
+    }
+  }
+}
+
 .post__name {
   font-family: var(--font-body);
   font-size: 15px;

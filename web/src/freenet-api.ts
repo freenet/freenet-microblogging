@@ -36,7 +36,15 @@ import {
   shardContractKeyTFromParts,
   hexToBytes,
 } from "./shard-key";
-import { signPost, signLike, signRepost, signQuoteRef, signReply } from "./identity";
+import {
+  signPost,
+  signLike,
+  signRepost,
+  signQuoteRef,
+  signReply,
+  signFollow,
+  signProfile,
+} from "./identity";
 
 /**
  * Assemble the `PutRequest` that instantiates a parameterized shard contract.
@@ -305,6 +313,32 @@ function stringToColor(str: string): string {
   return `hsl(${hue}, 65%, 45%)`;
 }
 
+/**
+ * One entry of the user shard's `follows` map (Rust `FollowState`): the seq of
+ * the op that last touched this key, and whether that op was a follow. The
+ * shard merges per key by highest seq, so a tombstone (`following: false`) is
+ * NOT an absent entry — it is a real record that outranks an older follow.
+ */
+interface ContractFollowState {
+  seq?: number;
+  following?: boolean;
+}
+
+/** The owner's follow set, as surfaced to the UI: only keys actively followed. */
+export interface FollowsState {
+  /** Hex VKs the owner currently follows (tombstones filtered out). */
+  following: Set<string>;
+}
+
+/** A pending profile/follow op awaiting the delegate's `SignedShardOp`. */
+interface PendingShardOp {
+  nonce: string;
+  /** What the op does, for logging and for reverting an optimistic toggle. */
+  kind: "profile" | "follow" | "unfollow";
+  /** Follow/unfollow only: the targets the op carries. */
+  targets: string[];
+}
+
 export type ConnectionStatus =
   | "disconnected"
   | "connecting"
@@ -334,6 +368,18 @@ export interface FreenetCallbacks {
    * the caller can replace (not merge) its local replica.
    */
   onRepliesUpdated?: (rootPostId: string, replies: Post[]) => void;
+  /**
+   * Optional: the owner's follow set, re-emitted whenever their user shard is
+   * read or updated. The full set is passed so the caller replaces rather than
+   * merges — an unfollow is a tombstone in the contract, not a removal, and
+   * merging would never drop it from the UI.
+   */
+  onFollowsUpdated?: (follows: FollowsState) => void;
+  /**
+   * Optional: the aggregated Following feed — posts from every followed user's
+   * shard, newest first. Emitted after a followed-shard GET completes.
+   */
+  onFollowingPostsLoaded?: (posts: Post[]) => void;
 }
 
 export class FreenetConnection {
@@ -422,6 +468,21 @@ export class FreenetConnection {
   private likeRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Reposts awaiting a delegate `SignedRepost`, keyed by nonce. */
   private pendingReposts: PendingRepost[] = [];
+  /** Profile/follow ops awaiting a delegate `SignedShardOp`, keyed by nonce. */
+  private pendingShardOps: PendingShardOp[] = [];
+  /** Hex VKs the owner currently follows, from their own shard's `follows`. */
+  private following: Set<string> = new Set();
+  /**
+   * Followed owners' shard keys, by hex VK. A followed shard is read but never
+   * PUT: instantiating someone else's shard from here would write an empty
+   * state under their key, and we have no signature for it.
+   */
+  private followedShardKeys: Map<string, ContractKey> = new Map();
+  /** Reverse index instance-id → owner hex VK, to route followed-shard GETs. */
+  private followedInstanceIds: Map<string, string> = new Map();
+  /** Latest posts read per followed owner, merged into the Following feed. */
+  private followedPosts: Map<string, Post[]> = new Map();
+
   /** Quote-refs awaiting a delegate `SignedQuoteRef`, keyed by nonce. */
   private pendingQuoteRefs: PendingQuoteRef[] = [];
   /** Replies awaiting a delegate `Signed` response (SignReply), keyed by nonce. */
@@ -583,6 +644,25 @@ export class FreenetConnection {
         this.callbacks.onGlobalPostsLoaded?.(posts);
         return;
       }
+      // A followed user's shard: cache their posts and re-emit the aggregated
+      // Following feed. Checked before the owner branch because both are user
+      // shards and only the instance id tells them apart.
+      const followedOwner = this.followedInstanceIds.get(respId ?? "");
+      if (followedOwner) {
+        const followedJson = new TextDecoder("utf8").decode(
+          Uint8Array.from(response.state),
+        );
+        const followedRaw =
+          (JSON.parse(followedJson) as UserShardState).posts ?? [];
+        // Replies live on their author's shard too, but the feed shows
+        // top-level posts only — the same filter the global index applies.
+        this.followedPosts.set(
+          followedOwner,
+          followedRaw.filter((cp) => !cp.reply_to).map(contractPostToUiPost),
+        );
+        this.emitFollowingFeed();
+        return;
+      }
       // The only other GET source is the owner's user shard. Drop anything else.
       if (this.userShardInstanceId === null || respId !== this.userShardInstanceId) {
         return;
@@ -590,11 +670,15 @@ export class FreenetConnection {
       const stateJson = new TextDecoder("utf8").decode(
         Uint8Array.from(response.state),
       );
-      const rawPosts = (JSON.parse(stateJson) as UserShardState).posts ?? [];
+      const shardState = JSON.parse(stateJson) as UserShardState;
+      const rawPosts = shardState.posts ?? [];
       const posts = rawPosts.map(contractPostToUiPost);
       // Sort by timestamp descending (newest first)
       posts.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
       this.callbacks.onPostsLoaded(posts);
+      // The same GET carries the follow set — surface it so the UI's follow
+      // buttons and the Following feed both track the authoritative state.
+      this.emitFollows(shardState.follows);
     } catch (e) {
       console.error("[freenet] Failed to parse state:", e);
     }
@@ -608,6 +692,40 @@ export class FreenetConnection {
       const threadRoot = notifId ? this.threadInstanceToRoot.get(notifId) : undefined;
       if (threadRoot) {
         this.refreshLikes(threadRoot);
+        return;
+      }
+      // A followed user's shard changed. We subscribed to it in
+      // refreshFollowedShards, so their new posts arrive here — without this
+      // branch the subscription was dead weight: the owner-shard guard below
+      // dropped every foreign notification and the Following feed only ever
+      // refreshed when the follow SET changed, never when a followed user
+      // actually posted.
+      //
+      // Same dual shape as the global index: a delta from one node, a full
+      // post-merge state when relayed from another (freenet-core#4764). The
+      // delta carries only the new posts, so re-GET for the authoritative
+      // window rather than appending — the shard truncates to the newest 200
+      // post-merge, and appending here would drift from that.
+      const followedNotifOwner = notifId
+        ? this.followedInstanceIds.get(notifId)
+        : undefined;
+      if (followedNotifOwner) {
+        const followedState = notificationState(notification);
+        if (followedState !== null) {
+          const raw = (JSON.parse(followedState) as UserShardState).posts ?? [];
+          this.followedPosts.set(
+            followedNotifOwner,
+            raw.filter((cp) => !cp.reply_to).map(contractPostToUiPost),
+          );
+          this.emitFollowingFeed();
+          return;
+        }
+        const key = this.followedShardKeys.get(followedNotifOwner);
+        if (key) {
+          this.serializedGet(new GetRequest(key, false)).catch(() => {
+            // Unreachable followed shard: keep the last known posts.
+          });
+        }
         return;
       }
       // Global-index update (a post was shared to the public timeline). The
@@ -658,14 +776,20 @@ export class FreenetConnection {
         for (const cp of parsed.Posts ?? []) {
           this.callbacks.onNewPost(contractPostToUiPost(cp));
         }
+        // An Op delta carries the signed op, not the merged follow set — the
+        // authoritative set only exists post-merge in the shard, so re-GET
+        // rather than trying to apply the op locally.
+        if (parsed.Op !== undefined) this.loadUserShard();
         return;
       }
       const statePayload = notificationState(notification);
       if (statePayload !== null) {
-        const rawPosts = (JSON.parse(statePayload) as UserShardState).posts ?? [];
+        const notifiedState = JSON.parse(statePayload) as UserShardState;
+        const rawPosts = notifiedState.posts ?? [];
         const posts = rawPosts.map(contractPostToUiPost);
         posts.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
         this.callbacks.onPostsLoaded(posts);
+        this.emitFollows(notifiedState.follows);
       }
     } catch (e) {
       console.error("[freenet] Failed to parse update:", e);
@@ -794,6 +918,223 @@ export class FreenetConnection {
     this.api
       .subscribe(new SubscribeRequest(this.userShardKey, []))
       .catch((e) => console.error("[user-shard] subscribe failed:", e));
+  }
+
+  // --- User shard: follows + profile (owner-signed ops) ---------------------
+
+  /**
+   * Follow or unfollow a user by their hex-encoded ML-DSA-65 verifying key.
+   *
+   * The write lands on the CALLER'S OWN user shard (the follow set is owner
+   * state), never on the target's — so unlike a like there is no foreign shard
+   * to instantiate first. The delegate signs a `SignedOp`; the matching
+   * `SignedShardOp` is routed to {@link completeShardOp}, which folds it in via
+   * `ShardDelta::Op`.
+   *
+   * Returns false if it cannot proceed (no shard yet / no delegate / self-follow).
+   */
+  async followUser(targetVkHex: string, follow: boolean): Promise<boolean> {
+    if (!this.api || !this.userShardKey) {
+      console.warn("[follows] no user shard — cannot follow");
+      return false;
+    }
+    if (!targetVkHex) return false;
+    // Following yourself would put your own key in your follow set and then
+    // double-count your posts in the aggregated feed.
+    if (targetVkHex === this.ownerVkHex) {
+      console.warn("[follows] refusing to follow self");
+      return false;
+    }
+
+    const nonce = crypto.randomUUID();
+    this.pendingShardOps.push({
+      nonce,
+      kind: follow ? "follow" : "unfollow",
+      targets: [targetVkHex],
+    });
+    // seq is the owner's monotonic counter. The shard keeps the higher seq per
+    // key, so a later unfollow must outrank the follow it reverses —
+    // ms-precision time is monotonic enough for one user's own toggles.
+    const requested = signFollow(nonce, [targetVkHex], follow, Date.now());
+    if (!requested) {
+      this.pendingShardOps.pop();
+      console.warn("[follows] cannot follow: delegate not connected to sign");
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Update the owner's profile register (display name / handle / bio / avatar).
+   * Mirror of {@link followUser}: the delegate builds and signs the `Profile`
+   * payload, and {@link completeShardOp} folds the op into the owner's shard.
+   * The shard resolves concurrent writes last-write-wins by `seq`.
+   */
+  async updateProfile(
+    displayName: string,
+    handle: string,
+    bio = "",
+    avatar = "",
+  ): Promise<boolean> {
+    if (!this.api || !this.userShardKey) return false;
+    const nonce = crypto.randomUUID();
+    this.pendingShardOps.push({ nonce, kind: "profile", targets: [] });
+    const requested = signProfile(
+      nonce,
+      displayName,
+      handle,
+      bio,
+      avatar,
+      Date.now(),
+    );
+    if (!requested) {
+      this.pendingShardOps.pop();
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Complete a profile/follow op once the delegate returns a `SignedShardOp`.
+   * `payload` arrives hex-encoded because the delegate is the sole assembler of
+   * the signed bytes — decode it back to the exact array the signature covers
+   * and relay it verbatim; re-encoding it here from domain fields would risk a
+   * byte that differs from the one signed, which the shard rejects in silence.
+   */
+  async completeShardOp(signed: {
+    nonce: string;
+    op_type: string;
+    payload: string;
+    seq: number;
+    signer_pubkey: string;
+    signature: string;
+  }): Promise<boolean> {
+    if (!this.api || !this.userShardKey) return false;
+    const idx = this.pendingShardOps.findIndex((o) => o.nonce === signed.nonce);
+    if (idx === -1) {
+      console.warn(
+        "[user-shard] SignedShardOp with no matching pending op",
+        signed.nonce,
+      );
+      return false;
+    }
+    const [pending] = this.pendingShardOps.splice(idx, 1);
+
+    let payloadBytes: number[];
+    try {
+      payloadBytes = Array.from(hexToBytes(signed.payload));
+    } catch (e) {
+      console.error("[user-shard] SignedShardOp payload is not hex:", e);
+      return false;
+    }
+
+    // Matches Rust `SignedOp`: `payload` is `Vec<u8>`, which serde_json encodes
+    // as an array of byte values — not a string.
+    const op = {
+      op_type: signed.op_type,
+      payload: payloadBytes,
+      seq: signed.seq,
+      signer_pubkey: signed.signer_pubkey,
+      signature: signed.signature,
+    };
+
+    try {
+      const deltaBytes = new TextEncoder().encode(JSON.stringify({ Op: op }));
+      const update = new UpdateData(
+        UpdateDataType.DeltaUpdate,
+        new DeltaUpdate(Array.from(deltaBytes)),
+      );
+      await this.api.update(new UpdateRequest(this.userShardKey, update));
+      // Re-read the owner shard so the authoritative follow set (post-merge,
+      // post-truncation) replaces any optimistic local state.
+      this.loadUserShard();
+      return true;
+    } catch (e) {
+      console.error(`[user-shard] failed to send ${pending.kind} op:`, e);
+      // The write did not land — re-read so the UI reconciles back to truth.
+      this.loadUserShard();
+      return false;
+    }
+  }
+
+  /**
+   * Fold the shard's raw `follows` map into the active follow set and emit it.
+   *
+   * A tombstone is an entry with `following: false`, not an absent key — the
+   * contract keeps it so a stale follow arriving later cannot resurrect the
+   * relationship. The UI only ever wants live follows, so filter here and pass
+   * the whole set (replace, never merge).
+   */
+  private emitFollows(raw: Record<string, unknown> | undefined): void {
+    const next = new Set<string>();
+    for (const [target, value] of Object.entries(raw ?? {})) {
+      const fs = value as ContractFollowState;
+      if (fs?.following) next.add(target);
+    }
+    const changed =
+      next.size !== this.following.size ||
+      [...next].some((k) => !this.following.has(k));
+    this.following = next;
+    this.callbacks.onFollowsUpdated?.({ following: new Set(next) });
+    // Drop cached posts for anyone no longer followed, so an unfollow empties
+    // their contribution to the feed immediately rather than at next reload.
+    for (const owner of [...this.followedPosts.keys()]) {
+      if (!next.has(owner)) {
+        this.followedPosts.delete(owner);
+        this.followedShardKeys.delete(owner);
+      }
+    }
+    if (changed) {
+      this.emitFollowingFeed();
+      this.refreshFollowedShards();
+    }
+  }
+
+  /**
+   * Derive (and cache) a followed owner's user-shard key. Read-only: we never
+   * PUT a shard we do not own — a PUT would write an empty state under their
+   * key. If they have not instantiated their own shard yet, the GET simply
+   * fails and they contribute no posts.
+   */
+  private followedShardKeyFor(ownerHex: string): ContractKey | null {
+    const cached = this.followedShardKeys.get(ownerHex);
+    if (cached) return cached;
+    const codeHash =
+      typeof __USER_SHARD_CODE_HASH__ !== "undefined"
+        ? __USER_SHARD_CODE_HASH__
+        : null;
+    if (!codeHash || codeHash === "DEV_MODE_NO_CONTRACT_HASH") return null;
+    try {
+      const key = deriveShardContractKey(codeHash, hexToBytes(ownerHex));
+      this.followedShardKeys.set(ownerHex, key);
+      this.followedInstanceIds.set(key.encode(), ownerHex);
+      return key;
+    } catch (e) {
+      console.warn(`[follows] bad target key ${ownerHex.slice(0, 8)}…:`, e);
+      return null;
+    }
+  }
+
+  /** GET every followed user's shard, refreshing the aggregated feed. */
+  private refreshFollowedShards(): void {
+    if (!this.api) return;
+    for (const ownerHex of this.following) {
+      const key = this.followedShardKeyFor(ownerHex);
+      if (!key) continue;
+      // Subscribe so their later posts arrive live, and GET for the snapshot.
+      this.serializedGet(new GetRequest(key, true)).catch(() => {
+        // A followed user with no shard yet (or an unreachable one) is normal —
+        // they just contribute nothing. Not an error worth surfacing.
+      });
+    }
+  }
+
+  /** Merge every followed owner's cached posts into one newest-first feed. */
+  private emitFollowingFeed(): void {
+    const all: Post[] = [];
+    for (const posts of this.followedPosts.values()) all.push(...posts);
+    all.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+    this.callbacks.onFollowingPostsLoaded?.(all);
   }
 
   // --- Thread shard: likes (ADR-0001 Phase 4 slice 2) ----------------------
@@ -1680,6 +2021,22 @@ export class FreenetConnection {
    * so only the stranded draft is removed — unrelated errors (GetIdentity,
    * Export, …) carry no nonce and leave the queue untouched.
    */
+  /**
+   * Drop a pending profile/follow op the delegate failed to sign, so it does
+   * not leak (every other pending surface has this — without it a failed
+   * SignFollow left an entry that a LATER op with a recycled nonce could match).
+   * Returns true if one was actually dropped, so the caller can revert its
+   * optimistic follow toggle.
+   */
+  dropPendingShardOp(nonce: string): boolean {
+    const idx = this.pendingShardOps.findIndex((o) => o.nonce === nonce);
+    if (idx === -1) return false;
+    this.pendingShardOps.splice(idx, 1);
+    // Re-read so any optimistic follow state is reconciled back to the truth.
+    this.loadUserShard();
+    return true;
+  }
+
   dropPendingPost(nonce: string): void {
     const idx = this.pendingPosts.findIndex((d) => d.nonce === nonce);
     if (idx !== -1) this.pendingPosts.splice(idx, 1);

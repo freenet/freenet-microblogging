@@ -203,6 +203,58 @@ export function signReply(
   return true;
 }
 
+/**
+ * Ask the delegate to sign a follow/unfollow op for the owner's OWN user shard.
+ * `targets` are hex-encoded ML-DSA-65 verifying keys. The delegate assembles the
+ * `SignedOp` payload and signing bytes (common::signed_op under
+ * USER_SHARD_CONTEXT) and replies with a `SignedShardOp` routed through
+ * onDelegateResponse → freenet-api completeShardOp. Returns false if no
+ * delegate (cannot sign offline).
+ */
+export function signFollow(
+  nonce: string,
+  targets: string[],
+  follow: boolean,
+  seq: number,
+): boolean {
+  if (!isDelegateConnected()) return false;
+  sendIdentityMessage(delegateApi!, delegateKeyBytes!, delegateCodeHashBytes!, {
+    type: "SignFollow",
+    nonce,
+    targets,
+    follow,
+    seq,
+  }).catch((e) => console.warn("[identity] SignFollow failed:", e));
+  return true;
+}
+
+/**
+ * Ask the delegate to sign a profile-update op for the owner's user shard.
+ * Mirror of {@link signFollow}: the delegate builds the canonical `Profile`
+ * payload and replies with a `SignedShardOp`. The shard resolves concurrent
+ * profile writes last-write-wins by `seq`, so it must strictly increase.
+ */
+export function signProfile(
+  nonce: string,
+  displayName: string,
+  handle: string,
+  bio: string,
+  avatar: string,
+  seq: number,
+): boolean {
+  if (!isDelegateConnected()) return false;
+  sendIdentityMessage(delegateApi!, delegateKeyBytes!, delegateCodeHashBytes!, {
+    type: "SignProfile",
+    nonce,
+    display_name: displayName,
+    handle,
+    bio,
+    avatar,
+    seq,
+  }).catch((e) => console.warn("[identity] SignProfile failed:", e));
+  return true;
+}
+
 export function exportIdentity(): void {
   if (!isDelegateConnected()) {
     // Offline / no delegate: synthesize a placeholder so the modal still appears
