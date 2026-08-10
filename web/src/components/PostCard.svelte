@@ -2,6 +2,8 @@
   import type { Post } from "../types";
   import { formatRelativeTime } from "../utils";
   import { openRepostMenu } from "./repost-menu";
+  import { follows, identity, follow, retract } from "../stores/freenet";
+  import { setMuted } from "../mute";
 
   interface Props {
     post: Post;
@@ -23,6 +25,13 @@
     onOpen,
     lead = false,
   }: Props = $props();
+
+  // A post can only be followed if it carries its author's verifying key (the
+  // shard parameter). Mock/offline posts have none — no key, no follow button.
+  const authorKey = $derived(post.author.publicKey ?? "");
+  const isSelf = $derived(!!authorKey && authorKey === $identity?.publicKey);
+  const canFollow = $derived(!!authorKey && !isSelf && !!$identity?.publicKey);
+  const isFollowed = $derived($follows.has(authorKey));
 
   function getInitials(displayName: string): string {
     return displayName
@@ -122,6 +131,51 @@
       <span class="post__name">{post.author.displayName}</span>
       <span class="post__when">@{post.author.handle}<i>·</i>{formatRelativeTime(post.timestamp)}</span>
     </div>
+    {#if isSelf}
+      <button
+        class="post__mute"
+        title="Withdraw this post — your shard and the public timeline stop serving it. Copies already fetched by others, or held offline, cannot be reached."
+        onclick={(e) => {
+          e.stopPropagation();
+          if (
+            confirm(
+              "Withdraw this post?\n\nYour shard and the public timeline will stop serving it and will not re-accept it. This is not a delete: anyone who already has a copy, or is offline, keeps theirs.",
+            )
+          ) {
+            retract(post.id);
+          }
+        }}
+      >
+        Withdraw
+      </button>
+    {/if}
+    {#if canFollow}
+      <button
+        class="post__follow"
+        class:post__follow--on={isFollowed}
+        title={isFollowed
+          ? "Unfollow — signed by your key, recorded on your own shard"
+          : "Follow — signed by your key, recorded on your own shard"}
+        onclick={(e) => {
+          // The byline sits inside the card's open-thread click target.
+          e.stopPropagation();
+          follow(authorKey, !isFollowed);
+        }}
+      >
+        {isFollowed ? "Following" : "Follow"}
+      </button>
+      <button
+        class="post__mute"
+        aria-label="Mute this author"
+        title="Mute — hides their posts for you only. Nothing is deleted from the network and they are not told."
+        onclick={(e) => {
+          e.stopPropagation();
+          setMuted(authorKey, true);
+        }}
+      >
+        Mute
+      </button>
+    {/if}
   </div>
 
   <p class={lead ? "post__text post__text--lead" : "post__text"}>{post.content}</p>

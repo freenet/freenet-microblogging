@@ -1,6 +1,11 @@
 <script lang="ts">
   import type { Post } from "../types";
-  import { formatRelativeTime } from "../utils";
+  import {
+    formatRelativeTime,
+    MAX_CONTENT_BYTES,
+    contentLength,
+  } from "../utils";
+  import { muted, filterMuted } from "../mute";
   import { identity } from "../stores/freenet";
 
   const ICON_BACK = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
@@ -21,6 +26,10 @@
 
   let { root, replies, onBack, onReply }: Props = $props();
 
+  // A muted author's replies are hidden here too — a thread is exactly where an
+  // unwanted voice reaches you regardless of whether you follow them.
+  const shownReplies = $derived(filterMuted(replies, $muted));
+
   let replyText = $state("");
 
   function getInitials(displayName: string): string {
@@ -40,9 +49,16 @@
 
   let composeInitials = $derived($identity ? getInitials($identity.displayName) : "·");
 
+  // The reply box had no length check at all: an over-long reply was signed by
+  // the delegate and then dropped in silence by the thread shard, so it simply
+  // vanished. Same UTF-8 byte budget the contract enforces.
+  const replyRemaining = $derived(MAX_CONTENT_BYTES - contentLength(replyText));
+  const replyTooLong = $derived(replyRemaining < 0);
+
   function submit() {
     const content = replyText.trim();
     if (!content) return;
+    if (contentLength(content) > MAX_CONTENT_BYTES) return;
     onReply(root.id, content);
     replyText = "";
   }
@@ -80,10 +96,10 @@
       {@render avatar(root, 38, 14)}
       <div class="post__who">
         <span class="post__name">{root.author.displayName}</span>
-        <span class="post__when">{@html `@${root.author.handle}<i>·</i>${formatRelativeTime(root.timestamp)}`}</span>
+        <span class="post__when">@{root.author.handle}<i>·</i>{formatRelativeTime(root.timestamp)}</span>
       </div>
     </div>
-    <div class="thread-seal">{@html `${ICON_SHIELD}<span>Signed · root key ${keyTrunc} · <b>ML-DSA-65</b></span>`}</div>
+    <div class="thread-seal">{@html ICON_SHIELD}<span>Signed · root key {keyTrunc} · <b>ML-DSA-65</b></span></div>
   </div>
 
   <div class="thread-compose">
@@ -95,12 +111,23 @@
       bind:value={replyText}
       onkeydown={onKeydown}
     ></textarea>
-    <button class="thread-compose__btn" disabled={replyText.trim().length === 0} onclick={submit}>Reply</button>
+    {#if replyRemaining <= 40}
+      <span
+        class="thread-compose__count"
+        class:thread-compose__count--over={replyTooLong}
+        title="Bytes left — the contract limit is {MAX_CONTENT_BYTES} UTF-8 bytes, so accented characters and emoji cost more than one"
+      >{replyRemaining}</span>
+    {/if}
+    <button
+      class="thread-compose__btn"
+      disabled={replyText.trim().length === 0 || replyTooLong}
+      onclick={submit}>Reply</button
+    >
   </div>
 
-  <div class="thread-rhead">{@html `<span>Responses · ${replies.length}</span>`}</div>
+  <div class="thread-rhead"><span>Responses · {shownReplies.length}</span></div>
 
-  {#each replies as reply (reply.id)}
+  {#each shownReplies as reply (reply.id)}
     <div class="thread-reply">
       <div class="thread-reply__byline">
         {@render avatar(reply, 32, 13)}
@@ -113,7 +140,7 @@
     </div>
   {/each}
 
-  {#if replies.length === 0}
+  {#if shownReplies.length === 0}
     <div class="screen-empty">No replies yet — be the first.</div>
   {/if}
 </main>

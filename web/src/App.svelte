@@ -15,6 +15,7 @@
     identity,
     posts,
     globalPosts,
+    followingPosts,
     threadReplies,
     keyExportSecret,
     publish,
@@ -31,10 +32,12 @@
   // Child components (created in the next phase at these target paths).
   import Sidebar from "./components/Sidebar.svelte";
   import RightPanel from "./components/RightPanel.svelte";
+  import { muted, filterMuted } from "./mute";
   import Feed from "./components/Feed.svelte";
   import Explore from "./components/Explore.svelte";
   import Notifications from "./components/Notifications.svelte";
   import Profile from "./components/Profile.svelte";
+  import Roadmap from "./components/Roadmap.svelte";
   import Settings from "./components/Settings.svelte";
   import Thread from "./components/Thread.svelte";
   import ComposeModal from "./components/ComposeModal.svelte";
@@ -50,9 +53,22 @@
   // Compose modal control (was app.ts openCompose / openComposeModal).
   let composeState = $state<{ open: boolean; quoted?: Post }>({ open: false });
 
-  // Follow set — app.ts kept a (currently always-empty) followedPubkeys set
-  // and passed it through to Feed/PostCard for the following-note affordances.
-  const followedPubkeys = new Set<string>();
+  // The Following feed: the owner's own posts plus every followed user's,
+  // newest first. Own posts are included because a feed that hides your own
+  // writing reads as broken — and because a fresh account follows nobody, so
+  // the tab would otherwise be permanently empty.
+  const followingFeed = $derived(
+    filterMuted(
+      [...$posts, ...$followingPosts].sort(
+        (a, b) => b.timestamp.getTime() - a.timestamp.getTime(),
+      ),
+      $muted,
+    ),
+  );
+
+  // Discover is the widest surface — an unfollowed stranger reaches you here
+  // first, so it is where muting matters most.
+  const discoverFeed = $derived(filterMuted($globalPosts, $muted));
 
   // Thread replies: sourced from the thread-shard replies store (keyed by root
   // post id), which is populated by onRepliesUpdated whenever the thread shard
@@ -151,9 +167,8 @@
         />
       {:else if currentView === "feed"}
         <Feed
-          posts={$posts}
-          discoverPosts={$globalPosts}
-          {followedPubkeys}
+          posts={followingFeed}
+          discoverPosts={discoverFeed}
           onCompose={() => openCompose()}
           onOpen={(post) => openThread(post)}
           onLike={(postId, liked) => like(postId, liked)}
@@ -178,6 +193,8 @@
           onOpen={(post) => openThread(post)}
           onSettings={() => navigate("settings")}
         />
+      {:else if currentView === "roadmap"}
+        <Roadmap />
       {:else if currentView === "settings"}
         <Settings />
       {/if}

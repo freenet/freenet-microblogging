@@ -6,7 +6,13 @@
 // are still consumed by the corresponding .svelte components and live here.
 
 /** Which primary view the sidebar/right-panel navigation targets. */
-export type SidebarView = "feed" | "explore" | "notifications" | "profile" | "settings";
+export type SidebarView =
+  | "feed"
+  | "explore"
+  | "notifications"
+  | "profile"
+  | "roadmap"
+  | "settings";
 
 /** A trending entry rendered in the Explore view. */
 export interface ExploreItem {

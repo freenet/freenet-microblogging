@@ -42,8 +42,11 @@
 //!   never by arrival order, which would diverge. Over-cap eviction is
 //!   best-effort lossy, the same trade-off as the post window.
 
-use freenet_microblogging_common::post::{MAX_CONTENT_LEN, Post};
-use freenet_microblogging_common::signed_op::{OpType, Profile, SignedOp, USER_SHARD_CONTEXT};
+use freenet_microblogging_common::post::Post;
+use freenet_microblogging_common::signed_op::{
+    MAX_FOLLOW_TARGETS_PER_OP, MAX_TARGET_KEY_LEN, OpType, Profile, SignedOp, USER_SHARD_CONTEXT,
+    decode_id_list,
+};
 use freenet_stdlib::prelude::{
     blake3::{Hasher as Blake3, traits::digest::Digest},
     *,
@@ -54,19 +57,18 @@ use std::collections::BTreeMap;
 /// Recent-post retention window. ADR-0001 starting policy: ~200.
 const MAX_POSTS: usize = 200;
 
+/// Cap on retained retraction ops. Retractions are a pure grow-set: there is no
+/// sound way to GC one, because dropping it lets a replica that still holds the
+/// post re-introduce it on the next merge — the tombstone IS the memory. When
+/// the cap is hit the LOWEST op seqs are evicted (oldest retractions first),
+/// deterministically, so every replica evicts the same set.
+const MAX_RETRACT_OPS: usize = 1_000;
+
 /// Cap on the number of distinct followed keys retained. Like the profile field
 /// bounds, this caps an owner's self-bloat (the only blast radius for an
 /// owner-writes surface). Enforced post-merge in `validate_state` (transient
 /// over-bound during merge is tolerated, mirroring the post window).
 const MAX_FOLLOWS: usize = 5_000;
-
-/// Cap on targets a single follow/unfollow op may carry, so one op cannot
-/// blow the follow set in a single write.
-const MAX_FOLLOW_TARGETS_PER_OP: usize = 1_000;
-
-/// Maximum length of a followed-key hex string (an ML-DSA-65 VK is 1952 bytes →
-/// 3904 hex chars). Rejects malformed/oversized target strings.
-const MAX_TARGET_KEY_LEN: usize = 3904;
 
 /// Per-key follow record: the `seq` of the op that last touched this key and
 /// whether that op was a Follow (`true`) or an Unfollow (`false`). Merge keeps
@@ -92,6 +94,17 @@ struct UserShard {
     /// serialization order).
     #[serde(default)]
     follows: BTreeMap<String, FollowState>,
+    /// Owner-signed `RetractPost` ops keyed by op `seq`. The union of the ids
+    /// they name is the retraction tombstone set.
+    ///
+    /// The signed OP is retained, never a bare id list, for the same reason the
+    /// inbox retains its prune ops: state arrives from the network and
+    /// `validate_state` has to re-prove it. A bare list would let any peer ship
+    /// a state naming every one of the owner's posts as retracted and erase
+    /// them. Keeping the op means a retraction is only ever as good as the owner's
+    /// signature over it.
+    #[serde(default)]
+    retract_ops: BTreeMap<u64, SignedOp>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -139,9 +152,10 @@ fn post_hash(post: &Post) -> [u8; 32] {
 /// A post is acceptable iff within the length bound, self-verifying, and authored
 /// by this shard's owner (owner-writes — ADR-0001).
 fn post_is_acceptable(post: &Post, owner_vk_hex: &str) -> bool {
-    post.content.len() <= MAX_CONTENT_LEN
-        && post.author_pubkey == owner_vk_hex
-        && post.verify().is_ok()
+    // `within_bounds` covers content AND the author name/handle. Those two are
+    // author-chosen and ride inside the signature, so a signature alone does not
+    // bound them — an owner could otherwise bloat their own shard without limit.
+    post.within_bounds() && post.author_pubkey == owner_vk_hex && post.verify().is_ok()
 }
 
 /// Deterministic "newest-first" ordering for the retention window: timestamp
@@ -263,6 +277,19 @@ fn apply_op(shard: &mut UserShard, op: &SignedOp, owner: &str) -> bool {
             }
             changed
         }
+        OpType::RetractPost => {
+            // Union by op seq; an identical op dedupes. A peer cannot fabricate
+            // one (it would not verify against the owner), so this is a grow-set
+            // of genuine owner-signed retractions.
+            if decode_id_list(&op.payload).is_empty() {
+                return false;
+            }
+            shard.retract_ops.insert(op.seq, op.clone());
+            // Apply immediately so the post disappears on this write, not only
+            // after the next merge.
+            apply_retractions(shard);
+            true
+        }
         // Inbox-shard prune ops are not valid user-shard mutations. They are
         // bound to INBOX_SHARD_CONTEXT (so they would not even verify here under
         // USER_SHARD_CONTEXT), but reject them explicitly so the match stays
@@ -297,6 +324,14 @@ fn merge_state(shard: &mut UserShard, other: UserShard, owner: &str) {
     // Follows: higher seq wins per key, with the same equal-seq tie-break as
     // apply_op so a delta-applied state and a full-state merge converge. The cap
     // is applied deterministically post-merge in `truncate_follows`, not here.
+    // Retractions union by op seq. Each is owner-signed, so a peer cannot inject
+    // one; merging them BEFORE the post window is normalized means a post that
+    // arrives in the same merge as its own retraction never survives it.
+    for (seq, op) in other.retract_ops {
+        if op.verify(USER_SHARD_CONTEXT, owner).is_ok() {
+            shard.retract_ops.entry(seq).or_insert(op);
+        }
+    }
     for (target, other_fs) in other.follows {
         if target.len() > MAX_TARGET_KEY_LEN {
             continue;
@@ -308,6 +343,47 @@ fn merge_state(shard: &mut UserShard, other: UserShard, owner: &str) {
         if keep {
             shard.follows.insert(target, other_fs);
         }
+    }
+}
+
+/// The set of post ids named by every retained retraction op.
+fn retracted_ids(shard: &UserShard) -> std::collections::BTreeSet<String> {
+    let mut ids = std::collections::BTreeSet::new();
+    for op in shard.retract_ops.values() {
+        for id in decode_id_list(&op.payload) {
+            ids.insert(id);
+        }
+    }
+    ids
+}
+
+/// Drop every post named by a retraction.
+///
+/// On this shard the check is simple because the surface is owner-writes: the
+/// op verified against the owner, and a post only got in if its `author_pubkey`
+/// is the owner, so signer and author necessarily agree. The conditional-author
+/// rule that matters on public-write surfaces (global index) is enforced there.
+fn apply_retractions(shard: &mut UserShard) {
+    if shard.retract_ops.is_empty() {
+        return;
+    }
+    let ids = retracted_ids(shard);
+    shard.posts.retain(|p| !ids.contains(&p.id));
+}
+
+/// Bound the retained retraction ops. Pure grow-set — dropping a tombstone lets
+/// a replica that still holds the post re-introduce it on the next merge, so
+/// there is no sound GC, only this backstop. Evict the LOWEST seqs (oldest
+/// retractions) first; `BTreeMap` is already seq-ordered, so every replica
+/// evicts the identical set regardless of arrival order.
+fn gc_retract_ops(shard: &mut UserShard) {
+    if shard.retract_ops.len() <= MAX_RETRACT_OPS {
+        return;
+    }
+    let excess = shard.retract_ops.len() - MAX_RETRACT_OPS;
+    let stale: Vec<u64> = shard.retract_ops.keys().copied().take(excess).collect();
+    for seq in stale {
+        shard.retract_ops.remove(&seq);
     }
 }
 
@@ -343,8 +419,12 @@ fn truncate_follows(follows: &mut BTreeMap<String, FollowState>) {
 fn normalize(shard: &mut UserShard) {
     shard.posts.sort_by_cached_key(post_hash);
     shard.posts.dedup_by_key(|p| post_hash(p));
+    // Retractions apply BEFORE the window truncates, so a retracted post cannot
+    // occupy a slot that a live post should have had.
+    apply_retractions(shard);
     truncate_window(&mut shard.posts);
     truncate_follows(&mut shard.follows);
+    gc_retract_ops(shard);
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +440,10 @@ struct ShardSummary {
     profile: [u8; 32],
     /// blake3 over the serialized follows map.
     follows: [u8; 32],
+    /// blake3 over the serialized retraction ops. Without this a peer holding a
+    /// retraction we lack would summarize identically and never send it, so a
+    /// retracted post would linger on replicas that missed the op.
+    retractions: [u8; 32],
 }
 
 fn hash_bytes(bytes: &[u8]) -> [u8; 32] {
@@ -382,10 +466,12 @@ impl ShardSummary {
             None => [0u8; 32],
         };
         let follows = hash_bytes(&serde_json::to_vec(&shard.follows).unwrap_or_default());
+        let retractions = hash_bytes(&serde_json::to_vec(&shard.retract_ops).unwrap_or_default());
         ShardSummary {
             posts,
             profile,
             follows,
+            retractions,
         }
     }
 }
@@ -423,6 +509,29 @@ impl ContractInterface for UserShard {
             return Ok(ValidateResult::Invalid);
         }
         if shard.follows.keys().any(|k| k.len() > MAX_TARGET_KEY_LEN) {
+            return Ok(ValidateResult::Invalid);
+        }
+        // Retractions: every retained op must be a genuine owner signature over
+        // a RetractPost, and its `seq` must be the key it is filed under —
+        // otherwise a peer could file an op under a seq that collides with a real
+        // one and displace it. This is the check that makes a retraction
+        // only ever as strong as the owner's key.
+        for (seq, op) in &shard.retract_ops {
+            if op.op_type != OpType::RetractPost
+                || op.seq != *seq
+                || op.verify(USER_SHARD_CONTEXT, &owner).is_err()
+            {
+                return Ok(ValidateResult::Invalid);
+            }
+        }
+        if shard.retract_ops.len() > MAX_RETRACT_OPS {
+            return Ok(ValidateResult::Invalid);
+        }
+        // No retracted post may survive in the state. Without this a peer could
+        // ship a state that carries the owner's own retraction AND the post it
+        // retracts, and the post would be treated as live.
+        let retracted = retracted_ids(&shard);
+        if shard.posts.iter().any(|p| retracted.contains(&p.id)) {
             return Ok(ValidateResult::Invalid);
         }
         Ok(ValidateResult::Valid)
@@ -485,6 +594,7 @@ impl ContractInterface for UserShard {
             posts: vec![],
             profile: [0u8; 32],
             follows: [0u8; 32],
+            retractions: [0u8; 32],
         });
 
         // Posts the remote lacks → emit as a Posts delta.
@@ -504,7 +614,13 @@ impl ContractInterface for UserShard {
         // `merge_state`s it, reconciling every surface (posts ride along). When
         // only posts differ, the smaller `Posts` delta suffices.
         let local = ShardSummary::of(&shard);
-        let registers_differ = local.profile != remote.profile || local.follows != remote.follows;
+        // Retractions ride the same full-state path as the registers: a
+        // `Posts` delta has no slot for them, and shipping posts WITHOUT the
+        // retractions that withdraw them would hand the remote a state where a
+        // withdrawn post looks live.
+        let registers_differ = local.profile != remote.profile
+            || local.follows != remote.follows
+            || local.retractions != remote.retractions;
 
         let payload = if registers_differ {
             serde_json::to_vec(&shard)
@@ -1130,6 +1246,7 @@ mod test {
             posts: vec![],
             profile: [0u8; 32],
             follows: [0u8; 32],
+            retractions: [0u8; 32],
         };
         let delta = UserShard::get_state_delta(
             params_of(owner),
@@ -1447,5 +1564,153 @@ mod integration {
             synced.posts.is_empty(),
             "non-owner post must not propagate to an honest replica"
         );
+    }
+
+    // -- retraction --
+    //
+    // A retraction is a withdrawal, not a delete: it stops this shard serving
+    // the post and stops the post being re-accepted on merge. It cannot reach an
+    // offline replica or an archive, and the op is named RetractPost so nobody
+    // reads a guarantee into it that the network cannot give.
+
+    fn retract_op(ids: &[&str], seq: u64) -> SignedOp {
+        use freenet_microblogging_common::signed_op::encode_id_list;
+        let owned: Vec<String> = ids.iter().map(|s| (*s).to_string()).collect();
+        op(OpType::RetractPost, encode_id_list(&owned), seq)
+    }
+
+    /// A retraction signed by a key that is NOT the shard owner.
+    fn foreign_retract_op(ids: &[&str], seq: u64) -> SignedOp {
+        use freenet_microblogging_common::signed_op::encode_id_list;
+        let sk = MlDsa65::from_seed(&[7u8; 32].into());
+        let owned: Vec<String> = ids.iter().map(|s| (*s).to_string()).collect();
+        let mut o = SignedOp {
+            op_type: OpType::RetractPost,
+            payload: encode_id_list(&owned),
+            seq,
+            signer_pubkey: hex::encode(sk.verifying_key().encode()),
+            signature: None,
+        };
+        let sig: ml_dsa::Signature<MlDsa65> = sk.sign(&o.signing_payload(USER_SHARD_CONTEXT));
+        o.signature = Some(hex::encode(sig.encode()));
+        o
+    }
+
+    #[test]
+    fn retracting_a_post_removes_it_and_keeps_the_proof() {
+        let post = signed_post("regrettable", 1_000);
+        let id = post.id.clone();
+        let shard = apply(&UserShard::default(), vec![ShardDelta::Posts(vec![post])]);
+        assert_eq!(shard.posts.len(), 1);
+
+        let shard = apply(&shard, vec![ShardDelta::Op(retract_op(&[&id], 1))]);
+        assert!(shard.posts.is_empty());
+        // The signed op is retained: it is what makes the removal re-provable by
+        // validate_state and unproduceable by a peer.
+        assert_eq!(shard.retract_ops.len(), 1);
+        assert!(validate(&shard));
+    }
+
+    #[test]
+    fn a_retracted_post_cannot_be_resurrected_by_a_peer() {
+        // The tombstone IS the memory. A replica that still holds the post will
+        // offer it again; without the retained op it would be re-accepted.
+        let post = signed_post("regrettable", 1_000);
+        let id = post.id.clone();
+        let shard = apply(
+            &UserShard::default(),
+            vec![
+                ShardDelta::Posts(vec![post.clone()]),
+                ShardDelta::Op(retract_op(&[&id], 1)),
+            ],
+        );
+        let shard = apply(&shard, vec![ShardDelta::Posts(vec![post])]);
+        assert!(shard.posts.is_empty(), "retracted post came back");
+    }
+
+    #[test]
+    fn a_retraction_signed_by_another_key_does_nothing() {
+        // Only the owner may withdraw the owner's posts.
+        let post = signed_post("keep me", 1_000);
+        let id = post.id.clone();
+        let shard = apply(
+            &UserShard::default(),
+            vec![
+                ShardDelta::Posts(vec![post]),
+                ShardDelta::Op(foreign_retract_op(&[&id], 1)),
+            ],
+        );
+        assert_eq!(shard.posts.len(), 1, "a foreign retraction withdrew a post");
+        assert!(shard.retract_ops.is_empty());
+    }
+
+    #[test]
+    fn validate_rejects_a_state_holding_a_post_it_also_retracts() {
+        let post = signed_post("regrettable", 1_000);
+        let id = post.id.clone();
+        let mut shard = UserShard::default();
+        shard.posts.push(post);
+        shard.retract_ops.insert(1, retract_op(&[&id], 1));
+        assert!(!validate(&shard), "live post survived its own retraction");
+    }
+
+    #[test]
+    fn validate_rejects_a_retraction_filed_under_a_mismatched_seq() {
+        // Filing a genuine op under a different seq is how a peer would try to
+        // collide with, and displace, another retraction.
+        let mut shard = UserShard::default();
+        shard.retract_ops.insert(77, retract_op(&["some-id"], 1));
+        assert!(!validate(&shard));
+    }
+
+    #[test]
+    fn validate_rejects_a_retraction_signed_by_another_key() {
+        let mut shard = UserShard::default();
+        shard
+            .retract_ops
+            .insert(1, foreign_retract_op(&["some-id"], 1));
+        assert!(!validate(&shard));
+    }
+
+    #[test]
+    fn retractions_replicate_through_the_sync_path() {
+        // If the summary ignored retractions a peer holding one we lack would
+        // summarize identically and never send it, so the withdrawn post would
+        // linger here forever.
+        let post = signed_post("regrettable", 1_000);
+        let id = post.id.clone();
+
+        // A retracted; B still holds the post.
+        let a = apply(
+            &UserShard::default(),
+            vec![
+                ShardDelta::Posts(vec![post.clone()]),
+                ShardDelta::Op(retract_op(&[&id], 1)),
+            ],
+        );
+        let b = apply(&UserShard::default(), vec![ShardDelta::Posts(vec![post])]);
+        assert_eq!(b.posts.len(), 1);
+
+        let (a2, b2) = reconcile(&a, &b);
+        assert!(a2.posts.is_empty());
+        assert!(b2.posts.is_empty(), "peer kept a post the author withdrew");
+        assert_eq!(a2.retract_ops.len(), 1);
+        assert_eq!(b2.retract_ops.len(), 1);
+    }
+
+    #[test]
+    fn retraction_is_order_independent() {
+        // The retraction may arrive BEFORE the post it names — a pre-emptive
+        // tombstone from the owner must still withdraw the post on arrival.
+        let post = signed_post("regrettable", 1_000);
+        let id = post.id.clone();
+        let shard = apply(
+            &UserShard::default(),
+            vec![
+                ShardDelta::Op(retract_op(&[&id], 1)),
+                ShardDelta::Posts(vec![post]),
+            ],
+        );
+        assert!(shard.posts.is_empty());
     }
 }

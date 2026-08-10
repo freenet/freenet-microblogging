@@ -181,6 +181,61 @@
   min-width: 0;
 }
 
+// Mute control in the byline. Deliberately quieter than Follow: it is a
+// defensive action, not a call to action, and should not compete for attention.
+.post__mute {
+  flex-shrink: 0;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1.5px solid transparent;
+  background: transparent;
+  color: var(--ink-4);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+
+  &:hover {
+    color: var(--danger);
+    border-color: var(--line);
+  }
+}
+
+// Follow / Following toggle in the byline. `margin-left:auto` pushes it to the
+// trailing edge so it never crowds a long display name.
+.post__follow {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 5px 13px;
+  border-radius: 999px;
+  border: 1.5px solid var(--accent-mid);
+  background: transparent;
+  color: var(--accent);
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+
+  &:hover {
+    background: var(--accent-bg);
+  }
+
+  // Already following: quieter by default, and the hover state previews the
+  // destructive action (unfollow) rather than repeating the current state.
+  &--on {
+    border-color: var(--line);
+    color: var(--ink-3);
+
+    &:hover {
+      border-color: var(--accent-mid);
+      color: var(--accent);
+    }
+  }
+}
+
 .post__name {
   font-family: var(--font-body);
   font-size: 15px;
@@ -384,3 +439,164 @@
 [data-theme="dark"][data-surface="warm"] .masthead,
 [data-theme="dark"][data-surface="warm"] .thread-head,
 [data-theme="dark"][data-surface="warm"] .search-box { background: rgba(20, 18, 28, 0.92); }
+
+// ---------------------------------------------------------------------------
+// Roadmap
+// ---------------------------------------------------------------------------
+
+.roadmap-intro {
+  margin: 12px 0 0;
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
+.roadmap-note {
+  margin-top: 12px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface-1);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-3);
+
+  strong { color: var(--ink-2); }
+}
+
+.roadmap {
+  padding: 4px 0 40px;
+}
+
+.roadmap-section {
+  padding: 22px 20px 6px;
+
+  & + & { border-top: 1px solid var(--line-2); }
+}
+
+.roadmap-section__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  color: var(--ink-0);
+}
+
+.roadmap-section__blurb {
+  margin: 5px 0 16px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-4);
+}
+
+.roadmap-item {
+  padding: 14px 0;
+  border-top: 1px solid var(--line-2);
+
+  &:first-of-type { border-top: none; }
+}
+
+.roadmap-item__head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+.roadmap-item__title {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink-0);
+}
+
+.roadmap-item__summary {
+  margin: 6px 0 0;
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+// The honest part: why it matters, or what it costs. Quieter than the summary
+// but never hidden behind a disclosure — the trade-offs are the point.
+.roadmap-item__rationale {
+  margin: 6px 0 0;
+  padding-left: 11px;
+  border-left: 2px solid var(--line);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-4);
+}
+
+.roadmap-item__foot {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.roadmap-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  white-space: nowrap;
+
+  &--done {
+    border-color: transparent;
+    background: var(--trust-bg);
+    color: var(--trust);
+  }
+
+  &--building,
+  &--next {
+    border-color: var(--accent-mid);
+    background: var(--accent-bg);
+    color: var(--accent);
+  }
+
+  // Contract-changing work: existing shard addresses move, so the network
+  // redeploys. Flagged in red because it is the one property that decides
+  // whether an item can ship quietly or not at all.
+  &--breaks {
+    border-color: transparent;
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    color: var(--danger);
+  }
+}
+
+.roadmap-vote {
+  margin-left: auto;
+  padding: 5px 14px;
+  border-radius: 999px;
+  border: 1.5px solid var(--accent-mid);
+  background: transparent;
+  color: var(--accent);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+
+  &:hover:not(:disabled) { background: var(--accent-bg); }
+
+  &:disabled {
+    border-color: var(--line);
+    color: var(--ink-4);
+    cursor: not-allowed;
+  }
+}

@@ -68,6 +68,23 @@
       </button>
     </div>
 
+    <ul class="onboarding-facts">
+      <li>
+        <strong>Posts are public and permanent.</strong> Anyone can read them, and
+        there is no delete — a post leaves the network only once ~200 newer ones
+        have pushed it out of your shard.
+      </li>
+      <li>
+        <strong>Your key is your account.</strong> It is generated on this device
+        and never sent anywhere. Lose it and the identity is gone for good; there
+        is no reset, and nobody can restore it for you.
+      </li>
+      <li>
+        <strong>Who you follow is public too.</strong> Your follow list lives in
+        your own shard, which anyone can read.
+      </li>
+    </ul>
+
     <button class="onboarding-import-link" onclick={() => (showImport = !showImport)}>
       Import existing identity
     </button>

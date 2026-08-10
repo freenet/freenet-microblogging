@@ -89,7 +89,34 @@ pub struct Post {
 /// `validate_state` and the UI.
 pub const MAX_CONTENT_LEN: usize = 280;
 
+/// Maximum author display name, in UTF-8 bytes. Mirrors the profile register's
+/// [`MAX_DISPLAY_NAME_LEN`](crate::signed_op::MAX_DISPLAY_NAME_LEN): the same
+/// value shown in the same place in the UI should be bounded the same way, or
+/// the looser surface silently becomes the one that gets used.
+pub const MAX_AUTHOR_NAME_LEN: usize = 64;
+
+/// Maximum author handle, in UTF-8 bytes. Mirrors
+/// [`MAX_HANDLE_LEN`](crate::signed_op::MAX_HANDLE_LEN).
+pub const MAX_AUTHOR_HANDLE_LEN: usize = 32;
+
 impl Post {
+    /// Whether every author-controlled field is within its bound.
+    ///
+    /// A signature proves who wrote a record, not that the record is benign —
+    /// the author picks `author_name` / `author_handle` freely and signs
+    /// whatever they picked. Unbounded, those two fields have no ceiling at
+    /// all: a valid post could carry megabytes of "name" into every replica of
+    /// a shard whose only other bound is 280 bytes of content.
+    ///
+    /// Kept separate from `verify()` so the split stays legible: `verify()`
+    /// answers "did this key sign these bytes", `within_bounds()` answers "may
+    /// these bytes be stored at all".
+    pub fn within_bounds(&self) -> bool {
+        self.content.len() <= MAX_CONTENT_LEN
+            && self.author_name.len() <= MAX_AUTHOR_NAME_LEN
+            && self.author_handle.len() <= MAX_AUTHOR_HANDLE_LEN
+    }
+
     /// The exact bytes that are hashed for the ID and signed/verified.
     ///
     /// Length-prefixed concatenation (`u32` LE length + bytes per field) so no
@@ -495,5 +522,65 @@ mod test {
         }"#;
         let p: Post = serde_json::from_str(json).unwrap();
         assert!(p.signature.is_none());
+    }
+
+    // -- author-field bounds --
+    //
+    // A signature proves authorship, not innocence. These fields are chosen by
+    // the author and signed by them, so only an explicit bound stops a
+    // perfectly valid record from carrying an arbitrary payload into every
+    // replica.
+
+    #[test]
+    fn within_bounds_accepts_ordinary_fields() {
+        assert!(sample().within_bounds());
+    }
+
+    #[test]
+    fn within_bounds_rejects_oversized_author_name() {
+        let mut p = sample();
+        p.author_name = "x".repeat(MAX_AUTHOR_NAME_LEN + 1);
+        assert!(!p.within_bounds());
+    }
+
+    #[test]
+    fn within_bounds_rejects_oversized_author_handle() {
+        let mut p = sample();
+        p.author_handle = "x".repeat(MAX_AUTHOR_HANDLE_LEN + 1);
+        assert!(!p.within_bounds());
+    }
+
+    #[test]
+    fn within_bounds_still_rejects_oversized_content() {
+        let mut p = sample();
+        p.content = "x".repeat(MAX_CONTENT_LEN + 1);
+        assert!(!p.within_bounds());
+    }
+
+    #[test]
+    fn bounds_are_counted_in_utf8_bytes_not_chars() {
+        // `len()` is the BYTE length. A field of MAX/2 + 1 two-byte characters
+        // is over the bound even though it is well under it in `chars()`.
+        let mut p = sample();
+        p.author_handle = "ą".repeat(MAX_AUTHOR_HANDLE_LEN / 2 + 1);
+        assert!(p.author_handle.chars().count() <= MAX_AUTHOR_HANDLE_LEN);
+        assert!(!p.within_bounds());
+    }
+
+    #[test]
+    fn an_oversized_field_still_verifies_which_is_the_point() {
+        // The bound is NOT redundant with the signature: an over-bound post is
+        // cryptographically valid. If acceptance only checked `verify()`, this
+        // record would be stored and replicated.
+        let sk = MlDsa65::from_seed(&[3u8; 32].into());
+        let mut p = sample();
+        p.author_pubkey = hex::encode(sk.verifying_key().encode());
+        p.author_name = "x".repeat(MAX_AUTHOR_NAME_LEN + 1);
+        p.id = p.compute_id();
+        let sig: Signature<MlDsa65> = sk.sign(&p.signing_payload());
+        p.signature = Some(hex::encode(sig.encode()));
+
+        assert_eq!(p.verify(), Ok(()));
+        assert!(!p.within_bounds());
     }
 }
