@@ -2,7 +2,7 @@
   import type { Post } from "../types";
   import { formatRelativeTime } from "../utils";
   import { openRepostMenu } from "./repost-menu";
-  import { follows, identity, follow } from "../stores/freenet";
+  import { follows, identity, follow, retract } from "../stores/freenet";
   import { setMuted } from "../mute";
 
   interface Props {
@@ -131,6 +131,24 @@
       <span class="post__name">{post.author.displayName}</span>
       <span class="post__when">@{post.author.handle}<i>·</i>{formatRelativeTime(post.timestamp)}</span>
     </div>
+    {#if isSelf}
+      <button
+        class="post__mute"
+        title="Withdraw this post — your shard and the public timeline stop serving it. Copies already fetched by others, or held offline, cannot be reached."
+        onclick={(e) => {
+          e.stopPropagation();
+          if (
+            confirm(
+              "Withdraw this post?\n\nYour shard and the public timeline will stop serving it and will not re-accept it. This is not a delete: anyone who already has a copy, or is offline, keeps theirs.",
+            )
+          ) {
+            retract(post.id);
+          }
+        }}
+      >
+        Withdraw
+      </button>
+    {/if}
     {#if canFollow}
       <button
         class="post__follow"

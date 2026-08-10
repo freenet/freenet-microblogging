@@ -255,6 +255,31 @@ export function signProfile(
   return true;
 }
 
+/**
+ * Ask the delegate to sign a retraction withdrawing posts this key authored.
+ *
+ * `scope` picks the shard the signature is bound to — "user" for the author's
+ * own shard, "index" for the public timeline. They use different contexts AND
+ * different authorization rules, so one signature cannot serve both; a post that
+ * was shared publicly needs one call per scope.
+ */
+export function signRetract(
+  nonce: string,
+  postIds: string[],
+  seq: number,
+  scope: "user" | "index",
+): boolean {
+  if (!isDelegateConnected()) return false;
+  sendIdentityMessage(delegateApi!, delegateKeyBytes!, delegateCodeHashBytes!, {
+    type: "SignRetract",
+    nonce,
+    post_ids: postIds,
+    seq,
+    scope,
+  }).catch((e) => console.warn("[identity] SignRetract failed:", e));
+  return true;
+}
+
 export function exportIdentity(): void {
   if (!isDelegateConnected()) {
     // Offline / no delegate: synthesize a placeholder so the modal still appears

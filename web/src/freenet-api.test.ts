@@ -110,6 +110,7 @@ vi.mock("./identity", () => ({
   signReply: vi.fn(() => true),
   signFollow: vi.fn(() => true),
   signProfile: vi.fn(() => true),
+  signRetract: vi.fn(() => true),
 }));
 
 import {
@@ -903,6 +904,69 @@ describe("FreenetConnection", () => {
       const feed = feedCalls[feedCalls.length - 1][0] as Post[];
       // Replies live on their author's shard too, but the feed is top-level.
       expect(feed.map((p) => p.id)).toEqual(["p-new", "p-old"]);
+    });
+  });
+
+  describe("retraction — withdrawal, not deletion", () => {
+    async function readyConn2() {
+      const { conn, api, callbacks } = makeConnection();
+      conn.setUser(OWNER_VK, "Alice", "alice");
+      await drainGets(api);
+      return { conn, api, callbacks };
+    }
+
+    it("signs for BOTH scopes, because the two contracts judge differently", async () => {
+      const { conn } = await readyConn2();
+      const signRetractMock = (await import("./identity"))
+        .signRetract as unknown as ReturnType<typeof vi.fn>;
+      signRetractMock.mockClear();
+
+      expect(await conn.retractPosts(["post-1"])).toBe(true);
+      expect(signRetractMock).toHaveBeenCalledTimes(2);
+      const scopes = signRetractMock.mock.calls.map((c) => c[3]);
+      expect(scopes).toEqual(["user", "index"]);
+      // Same ids and same seq across both — only the binding differs.
+      expect(signRetractMock.mock.calls[0][1]).toEqual(["post-1"]);
+      expect(signRetractMock.mock.calls[0][2]).toBe(
+        signRetractMock.mock.calls[1][2],
+      );
+    });
+
+    it("routes a user-scope op to the owner shard as ShardDelta::Op", async () => {
+      const { conn, api } = await readyConn2();
+      const signRetractMock = (await import("./identity"))
+        .signRetract as unknown as ReturnType<typeof vi.fn>;
+      signRetractMock.mockClear();
+      await conn.retractPosts(["post-1"]);
+      const userNonce = signRetractMock.mock.calls[0][0] as string;
+
+      const before = api.updateCalls.length;
+      await conn.completeShardOp({
+        nonce: userNonce,
+        op_type: "RetractPost",
+        payload: "00",
+        seq: 5,
+        signer_pubkey: OWNER_VK,
+        signature: "sig",
+        scope: "user",
+      });
+      expect(api.updateCalls.length).toBe(before + 1);
+      const sent = api.updateCalls[api.updateCalls.length - 1];
+      const body = JSON.parse(
+        new TextDecoder().decode(
+          Uint8Array.from(
+            (sent as { data: { updateData: { delta: number[] } } }).data
+              .updateData.delta,
+          ),
+        ),
+      ) as { Op?: unknown; Retract?: unknown };
+      expect(body.Op).toBeDefined();
+      expect(body.Retract).toBeUndefined();
+    });
+
+    it("refuses an empty retraction", async () => {
+      const { conn } = await readyConn2();
+      expect(await conn.retractPosts([])).toBe(false);
     });
   });
 

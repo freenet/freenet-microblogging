@@ -44,6 +44,7 @@ import {
   signReply,
   signFollow,
   signProfile,
+  signRetract,
 } from "./identity";
 
 /**
@@ -334,7 +335,7 @@ export interface FollowsState {
 interface PendingShardOp {
   nonce: string;
   /** What the op does, for logging and for reverting an optimistic toggle. */
-  kind: "profile" | "follow" | "unfollow";
+  kind: "profile" | "follow" | "unfollow" | "retract";
   /** Follow/unfollow only: the targets the op carries. */
   targets: string[];
 }
@@ -1005,6 +1006,39 @@ export class FreenetConnection {
   }
 
   /**
+   * Withdraw posts this identity authored.
+   *
+   * Signs TWICE — once for the author's own shard, once for the public
+   * timeline — because the two contracts verify under different contexts and
+   * apply different authorization rules, so no single signature satisfies both.
+   *
+   * The index retraction is sent unconditionally, even for a post that was
+   * never shared publicly. The client does not track what it shared, and a
+   * retraction naming an id the index does not hold is inert: it applies to a
+   * post only when the signer is that post's author, and there is no such post.
+   * Sending it always is therefore safe and strictly better than guessing wrong
+   * and leaving a copy of a withdrawn post on the widest surface in the system.
+   */
+  async retractPosts(postIds: string[]): Promise<boolean> {
+    if (!this.api || !this.userShardKey || postIds.length === 0) return false;
+    const seq = Date.now();
+    let requested = false;
+    for (const scope of ["user", "index"] as const) {
+      const nonce = crypto.randomUUID();
+      this.pendingShardOps.push({ nonce, kind: "retract", targets: postIds });
+      if (signRetract(nonce, postIds, seq, scope)) {
+        requested = true;
+      } else {
+        this.pendingShardOps.pop();
+      }
+    }
+    if (!requested) {
+      console.warn("[retract] cannot retract: delegate not connected to sign");
+    }
+    return requested;
+  }
+
+  /**
    * Complete a profile/follow op once the delegate returns a `SignedShardOp`.
    * `payload` arrives hex-encoded because the delegate is the sole assembler of
    * the signed bytes — decode it back to the exact array the signature covers
@@ -1018,6 +1052,8 @@ export class FreenetConnection {
     seq: number;
     signer_pubkey: string;
     signature: string;
+    /** "user" (default) or "index" — which contract this signature is for. */
+    scope?: string;
   }): Promise<boolean> {
     if (!this.api || !this.userShardKey) return false;
     const idx = this.pendingShardOps.findIndex((o) => o.nonce === signed.nonce);
@@ -1048,21 +1084,39 @@ export class FreenetConnection {
       signature: signed.signature,
     };
 
+    // An "index" retraction goes to the singleton public timeline, under its own
+    // delta shape; everything else is a user-shard `ShardDelta::Op`.
+    const toIndex = signed.scope === "index";
+    const targetKey = toIndex ? this.globalIndexKey : this.userShardKey;
+    if (!targetKey) {
+      // No global index available (no code hash / offline). The user-shard half
+      // of the retraction still landed, so this is a partial withdrawal, not a
+      // failed one — say so rather than reporting success.
+      console.warn("[retract] no global index key — public copy not withdrawn");
+      return false;
+    }
+    const body = toIndex ? { Retract: op } : { Op: op };
+
     try {
-      const deltaBytes = new TextEncoder().encode(JSON.stringify({ Op: op }));
+      const deltaBytes = new TextEncoder().encode(JSON.stringify(body));
       const update = new UpdateData(
         UpdateDataType.DeltaUpdate,
         new DeltaUpdate(Array.from(deltaBytes)),
       );
-      await this.api.update(new UpdateRequest(this.userShardKey, update));
-      // Re-read the owner shard so the authoritative follow set (post-merge,
-      // post-truncation) replaces any optimistic local state.
-      this.loadUserShard();
+      await this.api.update(new UpdateRequest(targetKey, update));
+      if (toIndex) {
+        this.loadGlobalIndex();
+      } else {
+        // Re-read the owner shard so the authoritative state (post-merge,
+        // post-truncation) replaces any optimistic local state.
+        this.loadUserShard();
+      }
       return true;
     } catch (e) {
       console.error(`[user-shard] failed to send ${pending.kind} op:`, e);
       // The write did not land — re-read so the UI reconciles back to truth.
-      this.loadUserShard();
+      if (toIndex) this.loadGlobalIndex();
+      else this.loadUserShard();
       return false;
     }
   }

@@ -428,6 +428,7 @@ export const connection = new FreenetConnection({
         seq?: number;
         signer_pubkey?: string;
         signature?: string;
+        scope?: string;
       };
       if (
         signedOp.type === "SignedShardOp" &&
@@ -446,6 +447,7 @@ export const connection = new FreenetConnection({
             seq: signedOp.seq,
             signer_pubkey: signedOp.signer_pubkey,
             signature: signedOp.signature,
+            scope: signedOp.scope,
           })
           .catch((e) => console.error("[delegate] completeShardOp failed:", e));
         return;
@@ -593,6 +595,19 @@ export function follow(targetVkHex: string, following: boolean): void {
   connection
     .followUser(targetVkHex, following)
     .catch((e) => console.error("[follows] follow failed:", e));
+}
+
+/**
+ * Withdraw one of your own posts.
+ *
+ * Not a delete, and the UI must not call it one: the network cannot reach an
+ * offline replica or somebody's archive. What this does is stop your shard and
+ * the public timeline serving the post, and stop either re-accepting it.
+ */
+export function retract(postId: string): void {
+  connection
+    .retractPosts([postId])
+    .catch((e) => console.error("[retract] failed:", e));
 }
 
 /** Update the owner's profile register (display name / handle / bio / avatar). */
