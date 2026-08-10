@@ -5,6 +5,7 @@
     MAX_CONTENT_BYTES,
     contentLength,
   } from "../utils";
+  import { muted, filterMuted } from "../mute";
   import { identity } from "../stores/freenet";
 
   const ICON_BACK = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
@@ -24,6 +25,10 @@
   }
 
   let { root, replies, onBack, onReply }: Props = $props();
+
+  // A muted author's replies are hidden here too — a thread is exactly where an
+  // unwanted voice reaches you regardless of whether you follow them.
+  const shownReplies = $derived(filterMuted(replies, $muted));
 
   let replyText = $state("");
 
@@ -120,9 +125,9 @@
     >
   </div>
 
-  <div class="thread-rhead"><span>Responses · {replies.length}</span></div>
+  <div class="thread-rhead"><span>Responses · {shownReplies.length}</span></div>
 
-  {#each replies as reply (reply.id)}
+  {#each shownReplies as reply (reply.id)}
     <div class="thread-reply">
       <div class="thread-reply__byline">
         {@render avatar(reply, 32, 13)}
@@ -135,7 +140,7 @@
     </div>
   {/each}
 
-  {#if replies.length === 0}
+  {#if shownReplies.length === 0}
     <div class="screen-empty">No replies yet — be the first.</div>
   {/if}
 </main>

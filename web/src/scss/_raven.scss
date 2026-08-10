@@ -181,6 +181,27 @@
   min-width: 0;
 }
 
+// Mute control in the byline. Deliberately quieter than Follow: it is a
+// defensive action, not a call to action, and should not compete for attention.
+.post__mute {
+  flex-shrink: 0;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1.5px solid transparent;
+  background: transparent;
+  color: var(--ink-4);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+
+  &:hover {
+    color: var(--danger);
+    border-color: var(--line);
+  }
+}
+
 // Follow / Following toggle in the byline. `margin-left:auto` pushes it to the
 // trailing edge so it never crowds a long display name.
 .post__follow {

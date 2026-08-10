@@ -32,6 +32,7 @@
   // Child components (created in the next phase at these target paths).
   import Sidebar from "./components/Sidebar.svelte";
   import RightPanel from "./components/RightPanel.svelte";
+  import { muted, filterMuted } from "./mute";
   import Feed from "./components/Feed.svelte";
   import Explore from "./components/Explore.svelte";
   import Notifications from "./components/Notifications.svelte";
@@ -56,10 +57,17 @@
   // writing reads as broken — and because a fresh account follows nobody, so
   // the tab would otherwise be permanently empty.
   const followingFeed = $derived(
-    [...$posts, ...$followingPosts].sort(
-      (a, b) => b.timestamp.getTime() - a.timestamp.getTime(),
+    filterMuted(
+      [...$posts, ...$followingPosts].sort(
+        (a, b) => b.timestamp.getTime() - a.timestamp.getTime(),
+      ),
+      $muted,
     ),
   );
+
+  // Discover is the widest surface — an unfollowed stranger reaches you here
+  // first, so it is where muting matters most.
+  const discoverFeed = $derived(filterMuted($globalPosts, $muted));
 
   // Thread replies: sourced from the thread-shard replies store (keyed by root
   // post id), which is populated by onRepliesUpdated whenever the thread shard
@@ -159,7 +167,7 @@
       {:else if currentView === "feed"}
         <Feed
           posts={followingFeed}
-          discoverPosts={$globalPosts}
+          discoverPosts={discoverFeed}
           onCompose={() => openCompose()}
           onOpen={(post) => openThread(post)}
           onLike={(postId, liked) => like(postId, liked)}

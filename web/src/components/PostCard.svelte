@@ -3,6 +3,7 @@
   import { formatRelativeTime } from "../utils";
   import { openRepostMenu } from "./repost-menu";
   import { follows, identity, follow } from "../stores/freenet";
+  import { setMuted } from "../mute";
 
   interface Props {
     post: Post;
@@ -144,6 +145,17 @@
         }}
       >
         {isFollowed ? "Following" : "Follow"}
+      </button>
+      <button
+        class="post__mute"
+        aria-label="Mute this author"
+        title="Mute — hides their posts for you only. Nothing is deleted from the network and they are not told."
+        onclick={(e) => {
+          e.stopPropagation();
+          setMuted(authorKey, true);
+        }}
+      >
+        Mute
       </button>
     {/if}
   </div>
