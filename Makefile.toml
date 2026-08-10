@@ -165,6 +165,15 @@ dependencies = ["build-ui", "build-web-container"]
 
 [tasks.test]
 description = "Run all tests (Rust workspace + Vitest)"
+# The Vitest suite needs the shard code hashes: vite `define`s
+# __USER_SHARD_CODE_HASH__ & co. from web/*_code_hash.txt, which only exist once
+# the contracts are built (scripts/mirror-shard-wasm.sh writes them). Without
+# them vite injects "DEV_MODE_NO_CONTRACT_HASH", every shard path refuses to
+# derive a key, and 29 tests fail on a clean checkout — looking like a broken
+# repo rather than a missing build step. CI happened to be safe only because it
+# always runs `cargo make build` first; declare the dependency so a bare
+# `cargo make test` is correct too.
+dependencies = ["build-contracts"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
