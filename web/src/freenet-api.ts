@@ -480,6 +480,16 @@ export class FreenetConnection {
   private followedShardKeys: Map<string, ContractKey> = new Map();
   /** Reverse index instance-id → owner hex VK, to route followed-shard GETs. */
   private followedInstanceIds: Map<string, string> = new Map();
+  /**
+   * Followed owners we already issued a `SubscribeRequest` for, so a repeated
+   * follow-set emit does not stack duplicate subscriptions. Note the stdlib has
+   * no per-contract unsubscribe, so an unfollowed shard keeps delivering
+   * notifications for the session — they are dropped by the followedInstanceIds
+   * lookup once the entry is gone, but the node-side subscription persists
+   * until reconnect. Worth revisiting if follow churn ever gets heavy.
+   */
+  private subscribedFollowed: Set<string> = new Set();
+
   /** Latest posts read per followed owner, merged into the Following feed. */
   private followedPosts: Map<string, Post[]> = new Map();
 
@@ -1076,13 +1086,23 @@ export class FreenetConnection {
       [...next].some((k) => !this.following.has(k));
     this.following = next;
     this.callbacks.onFollowsUpdated?.({ following: new Set(next) });
-    // Drop cached posts for anyone no longer followed, so an unfollow empties
+    // Drop every trace of anyone no longer followed, so an unfollow empties
     // their contribution to the feed immediately rather than at next reload.
-    for (const owner of [...this.followedPosts.keys()]) {
-      if (!next.has(owner)) {
-        this.followedPosts.delete(owner);
-        this.followedShardKeys.delete(owner);
-      }
+    //
+    // The instance-id reverse index MUST be cleared too. Leaving it behind kept
+    // routing that shard's update notifications into the followed branch, which
+    // re-populated followedPosts for someone we just unfollowed — their posts
+    // reappeared in the feed on their next write.
+    for (const owner of [...this.followedShardKeys.keys()]) {
+      if (next.has(owner)) continue;
+      const staleKey = this.followedShardKeys.get(owner);
+      if (staleKey) this.followedInstanceIds.delete(staleKey.encode());
+      this.followedPosts.delete(owner);
+      this.followedShardKeys.delete(owner);
+      // The node-side subscription outlives us (no per-contract unsubscribe in
+      // the stdlib), but forget it here so a re-follow re-subscribes rather
+      // than trusting a subscription we can no longer prove is alive.
+      this.subscribedFollowed.delete(owner);
     }
     if (changed) {
       this.emitFollowingFeed();
@@ -1115,17 +1135,36 @@ export class FreenetConnection {
     }
   }
 
-  /** GET every followed user's shard, refreshing the aggregated feed. */
+  /**
+   * GET every followed user's shard for a snapshot, then subscribe so their
+   * later posts arrive live.
+   *
+   * The subscribe is a SEPARATE `SubscribeRequest` and must be, because
+   * `GetRequest(key, fetchContract, subscribe, blockingSubscribe)` takes
+   * `fetchContract` as its SECOND argument — passing `true` there fetches the
+   * contract code, it does not subscribe. It is issued only AFTER the GET
+   * resolves, for the same reason the global index does it that way: the node
+   * rejects a subscribe to a contract it does not yet hold, and a followed user
+   * who never instantiated their shard is a normal case, not an error.
+   */
   private refreshFollowedShards(): void {
     if (!this.api) return;
     for (const ownerHex of this.following) {
       const key = this.followedShardKeyFor(ownerHex);
       if (!key) continue;
-      // Subscribe so their later posts arrive live, and GET for the snapshot.
-      this.serializedGet(new GetRequest(key, true)).catch(() => {
-        // A followed user with no shard yet (or an unreachable one) is normal —
-        // they just contribute nothing. Not an error worth surfacing.
-      });
+      this.serializedGet(new GetRequest(key, true)).then(
+        () => {
+          if (this.subscribedFollowed.has(ownerHex)) return;
+          this.subscribedFollowed.add(ownerHex);
+          this.api
+            ?.subscribe(new SubscribeRequest(key, []))
+            .catch(() => this.subscribedFollowed.delete(ownerHex));
+        },
+        () => {
+          // A followed user with no shard yet (or an unreachable one) is normal
+          // — they contribute nothing until they publish. Not worth surfacing.
+        },
+      );
     }
   }
 

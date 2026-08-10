@@ -770,6 +770,86 @@ describe("FreenetConnection", () => {
       expect(api.putCalls.length).toBe(putsBefore);
     });
 
+    it("subscribes to a followed shard only AFTER its GET resolves", async () => {
+      const { api, callbacks } = await readyConn();
+      const subsBefore = api.subscribeCalls.length;
+      callbacks.onFollowsUpdated.mockClear();
+
+      deliverOwnerState(api, { [TARGET_VK]: { seq: 1, following: true } });
+      await flush();
+      // GET is out, but the node rejects a subscribe to a contract it does not
+      // hold yet — so nothing is subscribed until the GET comes back.
+      expect(api.subscribeCalls.length).toBe(subsBefore);
+
+      const followedGet = api.getCalls[api.getCalls.length - 1];
+      followedGet.resolve({} as GetResponse);
+      await flush();
+      await flush();
+      expect(api.subscribeCalls.length).toBe(subsBefore + 1);
+    });
+
+    it("an unfollow stops routing that shard's notifications back into the feed", async () => {
+      const { api, callbacks } = await readyConn();
+      deliverOwnerState(api, { [TARGET_VK]: { seq: 1, following: true } });
+      await flush();
+      const followedGet = api.getCalls[api.getCalls.length - 1];
+      api.handler.onContractGet({
+        key: followedGet.req.key,
+        state: Array.from(
+          new TextEncoder().encode(
+            JSON.stringify({
+              posts: [
+                {
+                  id: "p1",
+                  author_pubkey: TARGET_VK,
+                  author_name: "Bob",
+                  author_handle: "@bob",
+                  content: "hi",
+                  timestamp: 1000,
+                  signature: "s",
+                },
+              ],
+            }),
+          ),
+        ),
+      } as unknown as GetResponse);
+
+      let feedCalls = callbacks.onFollowingPostsLoaded.mock.calls;
+      expect((feedCalls[feedCalls.length - 1][0] as Post[]).length).toBe(1);
+
+      // Unfollow: the contract records a tombstone, not a removal.
+      callbacks.onFollowingPostsLoaded.mockClear();
+      deliverOwnerState(api, { [TARGET_VK]: { seq: 9, following: false } });
+      await flush();
+      feedCalls = callbacks.onFollowingPostsLoaded.mock.calls;
+      expect((feedCalls[feedCalls.length - 1][0] as Post[]).length).toBe(0);
+
+      // A late notification from the (still node-side subscribed) shard must
+      // NOT resurrect them — the reverse index entry is gone.
+      callbacks.onFollowingPostsLoaded.mockClear();
+      api.handler.onContractGet({
+        key: followedGet.req.key,
+        state: Array.from(
+          new TextEncoder().encode(
+            JSON.stringify({
+              posts: [
+                {
+                  id: "p2",
+                  author_pubkey: TARGET_VK,
+                  author_name: "Bob",
+                  author_handle: "@bob",
+                  content: "later",
+                  timestamp: 5000,
+                  signature: "s",
+                },
+              ],
+            }),
+          ),
+        ),
+      } as unknown as GetResponse);
+      expect(callbacks.onFollowingPostsLoaded).not.toHaveBeenCalled();
+    });
+
     it("aggregates a followed user's posts into the Following feed, top-level only", async () => {
       const { api, callbacks } = await readyConn();
       deliverOwnerState(api, { [TARGET_VK]: { seq: 1, following: true } });
