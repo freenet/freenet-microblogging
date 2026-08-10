@@ -80,10 +80,10 @@
       {@render avatar(root, 38, 14)}
       <div class="post__who">
         <span class="post__name">{root.author.displayName}</span>
-        <span class="post__when">{@html `@${root.author.handle}<i>·</i>${formatRelativeTime(root.timestamp)}`}</span>
+        <span class="post__when">@{root.author.handle}<i>·</i>{formatRelativeTime(root.timestamp)}</span>
       </div>
     </div>
-    <div class="thread-seal">{@html `${ICON_SHIELD}<span>Signed · root key ${keyTrunc} · <b>ML-DSA-65</b></span>`}</div>
+    <div class="thread-seal">{@html ICON_SHIELD}<span>Signed · root key {keyTrunc} · <b>ML-DSA-65</b></span></div>
   </div>
 
   <div class="thread-compose">
@@ -98,7 +98,7 @@
     <button class="thread-compose__btn" disabled={replyText.trim().length === 0} onclick={submit}>Reply</button>
   </div>
 
-  <div class="thread-rhead">{@html `<span>Responses · ${replies.length}</span>`}</div>
+  <div class="thread-rhead"><span>Responses · {replies.length}</span></div>
 
   {#each replies as reply (reply.id)}
     <div class="thread-reply">
