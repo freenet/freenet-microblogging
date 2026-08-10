@@ -1,7 +1,8 @@
 #![allow(unexpected_cfgs)]
 use freenet_microblogging_common::post::Post;
 use freenet_microblogging_common::signed_op::{
-    MAX_FOLLOW_TARGETS_PER_OP, MAX_TARGET_KEY_LEN, OpType, Profile, SignedOp, USER_SHARD_CONTEXT,
+    GLOBAL_INDEX_CONTEXT, MAX_FOLLOW_TARGETS_PER_OP, MAX_IDS_PER_OP, MAX_TARGET_KEY_LEN, OpType,
+    Profile, SignedOp, USER_SHARD_CONTEXT, encode_id_list,
 };
 use freenet_microblogging_common::thread::{LikeRecord, QuoteRef, RepostRecord};
 use freenet_stdlib::prelude::*;
@@ -126,6 +127,23 @@ enum Request {
         follow: bool,
         seq: u64,
     },
+    /// Sign a retraction withdrawing posts the signer authored.
+    ///
+    /// `scope` selects which shard the signature is bound to, because the two
+    /// use different contexts AND different authorization rules — a signature
+    /// valid for one must not carry into the other:
+    ///   * `"user"`  → the author's own user shard (owner-writes)
+    ///   * `"index"` → the public timeline (author-conditional)
+    ///
+    /// Withdrawing a post that was shared publicly needs BOTH, so the UI asks
+    /// twice with different nonces rather than the delegate inventing a
+    /// combined form the contracts would not recognise.
+    SignRetract {
+        nonce: String,
+        post_ids: Vec<String>,
+        seq: u64,
+        scope: String,
+    },
     /// Export the secret seed for backup/migration.
     ExportIdentity,
     /// Import a secret seed + identity from another device.
@@ -206,6 +224,11 @@ enum Response {
         seq: u64,
         signer_pubkey: String, // hex-encoded VK
         signature: String,     // hex-encoded ML-DSA-65 signature
+        /// Which shard this signature is bound to ("user" or "index"), so the
+        /// UI routes the op to the contract whose context it was signed under.
+        /// Profile/follow ops are always "user".
+        #[serde(default)]
+        scope: String,
     },
     ExportedIdentity {
         secret_key: String, // hex-encoded 32-byte secret seed
@@ -491,6 +514,12 @@ impl DelegateInterface for IdentityDelegate {
                         follow,
                         seq,
                     } => sign_follow(ctx, &nonce, &targets, follow, seq),
+                    Request::SignRetract {
+                        nonce,
+                        post_ids,
+                        seq,
+                        scope,
+                    } => sign_retract(ctx, &nonce, &post_ids, seq, &scope),
                     Request::ExportIdentity => export_identity(ctx),
                     Request::ImportIdentity {
                         secret_key,
@@ -510,6 +539,11 @@ impl DelegateInterface for IdentityDelegate {
     }
 }
 
+// `Response` is the delegate's wire enum, so its size is the size of its largest
+// variant. Boxing the Err here to satisfy `result_large_err` would add an
+// allocation on the error path of a function whose Ok path runs on every signing
+// request, to save moving a value that is immediately serialized anyway.
+#[allow(clippy::result_large_err)]
 /// Load and validate the stored seed, returning a reconstructed signing key.
 fn load_signing_key(ctx: &DelegateCtx) -> Result<MlDsaSigningKey<MlDsa65>, Response> {
     let Some(seed_bytes) = ctx.get_secret(SECRET_SEED) else {
@@ -776,6 +810,7 @@ fn build_signed_op(
     op_type: OpType,
     payload: Vec<u8>,
     seq: u64,
+    context: &[u8],
 ) -> SignedOp {
     let mut op = SignedOp {
         op_type,
@@ -784,14 +819,13 @@ fn build_signed_op(
         signer_pubkey: vk_hex(signing_key),
         signature: None,
     };
-    let signature: ml_dsa::Signature<MlDsa65> =
-        signing_key.sign(&op.signing_payload(USER_SHARD_CONTEXT));
+    let signature: ml_dsa::Signature<MlDsa65> = signing_key.sign(&op.signing_payload(context));
     op.signature = Some(hex::encode(signature.encode()));
     op
 }
 
 /// Turn a signed op into the wire response, hex-encoding the opaque payload.
-fn signed_op_response(nonce: &str, op: SignedOp) -> Response {
+fn signed_op_response(nonce: &str, op: SignedOp, scope: &str) -> Response {
     Response::SignedShardOp {
         nonce: nonce.to_string(),
         op_type: op.op_type,
@@ -799,9 +833,11 @@ fn signed_op_response(nonce: &str, op: SignedOp) -> Response {
         seq: op.seq,
         signer_pubkey: op.signer_pubkey,
         signature: op.signature.unwrap_or_default(),
+        scope: scope.to_string(),
     }
 }
 
+#[allow(clippy::result_large_err)] // see load_signing_key
 /// Load the signing key, re-tagging a load failure with this request's nonce so
 /// the UI can drop exactly the stranded pending action (mirrors `sign_like`).
 fn load_key_for(ctx: &DelegateCtx, nonce: &str) -> Result<MlDsaSigningKey<MlDsa65>, Response> {
@@ -851,8 +887,14 @@ fn sign_profile(
         };
     };
 
-    let op = build_signed_op(&signing_key, OpType::Profile, payload, seq);
-    signed_op_response(nonce, op)
+    let op = build_signed_op(
+        &signing_key,
+        OpType::Profile,
+        payload,
+        seq,
+        USER_SHARD_CONTEXT,
+    );
+    signed_op_response(nonce, op, "user")
 }
 
 fn sign_follow(
@@ -909,8 +951,63 @@ fn sign_follow(
     } else {
         OpType::Unfollow
     };
-    let op = build_signed_op(&signing_key, op_type, payload, seq);
-    signed_op_response(nonce, op)
+    let op = build_signed_op(&signing_key, op_type, payload, seq, USER_SHARD_CONTEXT);
+    signed_op_response(nonce, op, "user")
+}
+
+fn sign_retract(
+    ctx: &DelegateCtx,
+    nonce: &str,
+    post_ids: &[String],
+    seq: u64,
+    scope: &str,
+) -> Response {
+    let signing_key = match load_key_for(ctx, nonce) {
+        Ok(k) => k,
+        Err(resp) => return resp,
+    };
+
+    // The context IS the authorization rule. The user shard checks the signer is
+    // the shard owner; the global index checks the signer is each post's author.
+    // Signing under the wrong one produces an op the target contract silently
+    // ignores, so an unknown scope must fail loudly rather than guess.
+    let context: &[u8] = match scope {
+        "user" => USER_SHARD_CONTEXT,
+        "index" => GLOBAL_INDEX_CONTEXT,
+        other => {
+            return Response::Error {
+                message: format!(
+                    "unknown retract scope {other:?} (expected \"user\" or \"index\")"
+                ),
+                nonce: Some(nonce.to_string()),
+            };
+        }
+    };
+
+    if post_ids.is_empty() {
+        return Response::Error {
+            message: "retraction names no posts".to_string(),
+            nonce: Some(nonce.to_string()),
+        };
+    }
+    if post_ids.len() > MAX_IDS_PER_OP {
+        return Response::Error {
+            message: format!(
+                "retraction names {} posts, over the {MAX_IDS_PER_OP} cap",
+                post_ids.len()
+            ),
+            nonce: Some(nonce.to_string()),
+        };
+    }
+
+    let op = build_signed_op(
+        &signing_key,
+        OpType::RetractPost,
+        encode_id_list(post_ids),
+        seq,
+        context,
+    );
+    signed_op_response(nonce, op, scope)
 }
 
 fn export_identity(ctx: &DelegateCtx) -> Response {
@@ -1469,7 +1566,7 @@ mod test {
             avatar: "#3b82f6".into(),
         };
         let payload = serde_json::to_vec(&profile).expect("encode profile");
-        let op = build_signed_op(&sk, OpType::Profile, payload, 7);
+        let op = build_signed_op(&sk, OpType::Profile, payload, 7, USER_SHARD_CONTEXT);
 
         // Verifies for this owner, under the user-shard context.
         assert_eq!(op.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_A)), Ok(()));
@@ -1485,7 +1582,7 @@ mod test {
         let sk = signing_key_from_seed(&SEED_A);
         let targets = vec![owner_hex(&SEED_B), "ab".repeat(8)];
         let payload = serde_json::to_vec(&targets).expect("encode targets");
-        let op = build_signed_op(&sk, OpType::Follow, payload, 3);
+        let op = build_signed_op(&sk, OpType::Follow, payload, 3, USER_SHARD_CONTEXT);
 
         assert_eq!(op.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_A)), Ok(()));
         let decoded: Vec<String> = serde_json::from_slice(&op.payload).expect("decode targets");
@@ -1495,7 +1592,7 @@ mod test {
     #[test]
     fn signed_op_rejects_non_owner() {
         let sk = signing_key_from_seed(&SEED_A);
-        let op = build_signed_op(&sk, OpType::Follow, b"[]".to_vec(), 1);
+        let op = build_signed_op(&sk, OpType::Follow, b"[]".to_vec(), 1, USER_SHARD_CONTEXT);
         // Owner-writes: a shard parameterized by a different VK must reject it.
         assert_eq!(
             op.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_B)),
@@ -1507,7 +1604,7 @@ mod test {
     fn signed_op_does_not_verify_in_foreign_context() {
         use freenet_microblogging_common::signed_op::INBOX_SHARD_CONTEXT;
         let sk = signing_key_from_seed(&SEED_A);
-        let op = build_signed_op(&sk, OpType::Profile, b"{}".to_vec(), 1);
+        let op = build_signed_op(&sk, OpType::Profile, b"{}".to_vec(), 1, USER_SHARD_CONTEXT);
 
         // Bound to the user shard: replaying it into the inbox shard must fail.
         assert_eq!(op.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_A)), Ok(()));
@@ -1521,7 +1618,7 @@ mod test {
     fn signed_follow_cannot_be_replayed_as_unfollow() {
         let sk = signing_key_from_seed(&SEED_A);
         let targets = serde_json::to_vec(&vec![owner_hex(&SEED_B)]).expect("encode");
-        let mut op = build_signed_op(&sk, OpType::Follow, targets, 5);
+        let mut op = build_signed_op(&sk, OpType::Follow, targets, 5, USER_SHARD_CONTEXT);
         assert_eq!(op.verify(USER_SHARD_CONTEXT, &owner_hex(&SEED_A)), Ok(()));
 
         // op_type rides in the signed payload, so flipping it breaks the
@@ -1536,7 +1633,7 @@ mod test {
     #[test]
     fn signed_op_seq_and_payload_are_bound() {
         let sk = signing_key_from_seed(&SEED_A);
-        let base = build_signed_op(&sk, OpType::Profile, b"{}".to_vec(), 1);
+        let base = build_signed_op(&sk, OpType::Profile, b"{}".to_vec(), 1, USER_SHARD_CONTEXT);
 
         // seq is in the signed payload: bumping it to win a last-write-wins
         // race against the real owner must not verify.
@@ -1565,7 +1662,7 @@ mod test {
         // A `SignedOp` payload and a `Post` payload can never collide: the op
         // carries SIGNED_OP_DOMAIN_TAG, the post carries its own tag.
         let sk = signing_key_from_seed(&SEED_A);
-        let op = build_signed_op(&sk, OpType::Profile, b"x".to_vec(), 1);
+        let op = build_signed_op(&sk, OpType::Profile, b"x".to_vec(), 1, USER_SHARD_CONTEXT);
         let post = build_signed_post(&sk, "x", "Alice", "@alice", 1, "");
         assert_ne!(
             op.signing_payload(USER_SHARD_CONTEXT),
@@ -1577,8 +1674,14 @@ mod test {
     fn signed_op_response_hex_round_trips_payload() {
         let sk = signing_key_from_seed(&SEED_A);
         let payload = serde_json::to_vec(&vec!["deadbeef".to_string()]).expect("encode");
-        let op = build_signed_op(&sk, OpType::Unfollow, payload.clone(), 2);
-        let resp = signed_op_response("n-1", op);
+        let op = build_signed_op(
+            &sk,
+            OpType::Unfollow,
+            payload.clone(),
+            2,
+            USER_SHARD_CONTEXT,
+        );
+        let resp = signed_op_response("n-1", op, "user");
 
         // The UI relays `payload` back verbatim into the delta it PUTs, so the
         // hex must decode to exactly the bytes that were signed.
@@ -1597,5 +1700,61 @@ mod test {
             }
             _ => panic!("expected a SignedShardOp response"),
         }
+    }
+
+    // -- retraction signing --
+
+    #[test]
+    fn retraction_is_bound_to_the_scope_it_was_signed_for() {
+        use freenet_microblogging_common::signed_op::{GLOBAL_INDEX_CONTEXT, encode_id_list};
+        let sk = signing_key_from_seed(&SEED_A);
+        let ids = vec!["post-1".to_string()];
+
+        let user_op = build_signed_op(
+            &sk,
+            OpType::RetractPost,
+            encode_id_list(&ids),
+            1,
+            USER_SHARD_CONTEXT,
+        );
+        let index_op = build_signed_op(
+            &sk,
+            OpType::RetractPost,
+            encode_id_list(&ids),
+            1,
+            GLOBAL_INDEX_CONTEXT,
+        );
+
+        let me = owner_hex(&SEED_A);
+        // Each verifies only under the context it was signed for. The two shards
+        // apply DIFFERENT authorization rules, so a signature must not carry.
+        assert_eq!(user_op.verify(USER_SHARD_CONTEXT, &me), Ok(()));
+        assert_eq!(
+            user_op.verify(GLOBAL_INDEX_CONTEXT, &me),
+            Err(OpVerifyError::SignatureInvalid)
+        );
+        assert_eq!(index_op.verify(GLOBAL_INDEX_CONTEXT, &me), Ok(()));
+        assert_eq!(
+            index_op.verify(USER_SHARD_CONTEXT, &me),
+            Err(OpVerifyError::SignatureInvalid)
+        );
+        // Same ids, same seq — only the binding differs.
+        assert_eq!(user_op.payload, index_op.payload);
+        assert_ne!(user_op.signature, index_op.signature);
+    }
+
+    #[test]
+    fn retraction_payload_round_trips_the_ids() {
+        use freenet_microblogging_common::signed_op::{decode_id_list, encode_id_list};
+        let sk = signing_key_from_seed(&SEED_A);
+        let ids = vec!["a".to_string(), "bb".to_string(), "ccc".to_string()];
+        let op = build_signed_op(
+            &sk,
+            OpType::RetractPost,
+            encode_id_list(&ids),
+            9,
+            USER_SHARD_CONTEXT,
+        );
+        assert_eq!(decode_id_list(&op.payload), ids);
     }
 }
