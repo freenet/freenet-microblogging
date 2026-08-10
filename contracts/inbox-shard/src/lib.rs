@@ -67,7 +67,9 @@
 //! shard (AGENTS.md → "Every write path verifies").
 
 use freenet_microblogging_common::inbox::{Notification, WriterCert};
-use freenet_microblogging_common::signed_op::{INBOX_SHARD_CONTEXT, OpType, SignedOp};
+use freenet_microblogging_common::signed_op::{
+    INBOX_SHARD_CONTEXT, OpType, SignedOp, decode_id_list, encode_id_list,
+};
 use freenet_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -83,13 +85,14 @@ const MAX_NOTIFS: usize = 10_000;
 /// selective ops few, so this rarely bites.
 const MAX_PRUNE_IDS_OPS: usize = 1_000;
 
-/// Max ids one `PruneIds` op may carry, so a single signed op cannot be made
-/// arbitrarily large.
-const MAX_PRUNE_IDS_PER_OP: usize = 1_000;
-
 /// Max length of a notification id (hex of a 32-byte blake3 hash = 64 chars);
 /// a small margin guards against a malformed oversized key.
-const MAX_ID_LEN: usize = 128;
+///
+/// Re-exported from `common::signed_op` rather than restated: the shared id-list
+/// decoder enforces the same bound while parsing a prune payload, and two
+/// definitions that drift would let an id pass one check and fail the other.
+/// (`MAX_PRUNE_IDS_PER_OP` moved there too, as `MAX_IDS_PER_OP`.)
+use freenet_microblogging_common::signed_op::MAX_ID_LEN;
 
 /// Inbox shard state for one owner.
 ///
@@ -241,13 +244,19 @@ fn merge_prune_op(shard: &mut InboxShard, op: SignedOp) {
             shard.prune_ids_ops.entry(op.seq).or_insert(op);
         }
         // A non-prune op type is not a valid inbox mutation; ignore it.
-        OpType::Profile | OpType::Follow | OpType::Unfollow => {}
+        // Not inbox surfaces. They are bound to a different shard context so
+        // they would not verify here anyway, but stay exhaustive so a new
+        // OpType can never fall through into an inbox mutation by default.
+        OpType::Profile | OpType::Follow | OpType::Unfollow | OpType::RetractPost => {}
     }
 }
 
-/// Decode a `PruneIds` payload: a length-prefixed (u32 LE) sequence of hex id
-/// strings, capped at [`MAX_PRUNE_IDS_PER_OP`]. Malformed input yields the ids
-/// parsed so far (tolerant, never panics — AGENTS.md → "No unwrap/panic").
+/// Decode a `PruneIds` payload into the ids it names.
+///
+/// The wire format lives in `common::signed_op` because the same
+/// length-prefixed id list is also the payload of `OpType::RetractPost`, and
+/// those bytes ride inside the signature — two encoders that drift by a byte
+/// produce ops that verify on one side and not the other, failing silently.
 ///
 /// Note: ids only — no per-id `notif_seq`. An earlier draft carried an
 /// owner-attested `notif_seq` per id to let the high-water GC tombstones, but
@@ -257,34 +266,13 @@ fn merge_prune_op(shard: &mut InboxShard, op: SignedOp) {
 /// There is no sound high-water GC for a bare id, so tombstones are a pure
 /// grow-set bounded only by [`MAX_PRUNE_IDS_OPS`].
 fn decode_prune_ids(payload: &[u8]) -> Vec<String> {
-    let mut ids = Vec::new();
-    let mut i = 0;
-    while i + 4 <= payload.len() && ids.len() < MAX_PRUNE_IDS_PER_OP {
-        let len = u32::from_le_bytes([payload[i], payload[i + 1], payload[i + 2], payload[i + 3]])
-            as usize;
-        i += 4;
-        if len > MAX_ID_LEN || i + len > payload.len() {
-            break;
-        }
-        if let Ok(s) = std::str::from_utf8(&payload[i..i + len]) {
-            ids.push(s.to_owned());
-        }
-        i += len;
-    }
-    ids
+    decode_id_list(payload)
 }
 
-/// Encode a `PruneIds` payload from a list of ids (mirror of [`decode_prune_ids`]).
-/// Lives in the contract so tests and any future delegate share one encoder; the
-/// bytes go into the op's signed payload, so the owner attests which ids they
-/// pruned.
+/// Encode a `PruneIds` payload from a list of ids. Thin alias over the shared
+/// encoder, kept so existing call sites and tests read in inbox terms.
 pub fn encode_prune_ids(ids: &[String]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    for id in ids {
-        buf.extend_from_slice(&(id.len() as u32).to_le_bytes());
-        buf.extend_from_slice(id.as_bytes());
-    }
-    buf
+    encode_id_list(ids)
 }
 
 /// Bound the retained `PruneIds` op set. Tombstones are a pure grow-set — there
