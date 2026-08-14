@@ -151,11 +151,16 @@ fn owner_vk_hex(parameters: &Parameters<'_>) -> String {
 }
 
 /// The writer-credential seam (ADR-0001 abuse model). Today it accepts every
-/// sender — `WriterCert` is a reserved wire slot, not yet a policy. When a real
-/// credential (GhostKey) lands, gate deliveries here; the cert already rides on
-/// each notification so doing so is an additive change, not a format break.
-fn verify_writer_cert(_cert: Option<&WriterCert>) -> bool {
-    true
+/// sender — `WriterCert` is a reserved wire slot, not yet a policy — but does
+/// bound the cert's size: `cert` is excluded from the notification's signing
+/// payload (see `common::inbox`), so it is unauthenticated as well as
+/// unbounded, and an unbounded field on an anyone-writes surface is a storage
+/// amplification primitive regardless of whether its *content* is checked.
+/// When a real credential (GhostKey) lands, gate deliveries here; the cert
+/// already rides on each notification so doing so is an additive change, not a
+/// format break.
+fn verify_writer_cert(cert: Option<&WriterCert>) -> bool {
+    cert.is_none_or(WriterCert::within_bounds)
 }
 
 /// The current high-water: the `seq` of the retained `PruneBefore` op, or 0 if
@@ -184,6 +189,7 @@ fn tombstone_ids(shard: &InboxShard) -> std::collections::HashSet<String> {
 fn notif_is_acceptable(id: &str, notif: &Notification, owner: &str) -> bool {
     !owner.is_empty()
         && id.len() <= MAX_ID_LEN
+        && notif.within_bounds()
         && id == notif.id(owner)
         && notif.verify(owner).is_ok()
         && verify_writer_cert(notif.writer_cert.as_ref())
@@ -709,6 +715,45 @@ mod test {
             vec![delta_item(&InboxDelta::Notifs(vec![n.clone(), n.clone()]))],
         );
         assert_eq!(out.notifs.len(), 1);
+    }
+
+    #[test]
+    fn oversized_ref_id_rejected() {
+        // ref_id is sender-chosen and self-verifying, so a signature alone
+        // does not bound it — only `within_bounds()` does. An inbox is
+        // anyone-writes, so an unbounded ref_id is an unbounded write
+        // primitive available to anyone.
+        let big = "x".repeat(freenet_microblogging_common::inbox::MAX_REF_ID_LEN + 1);
+        let n = signed_notif([2u8; 32], NotifKind::Reply, &big, 1);
+        assert_eq!(n.verify(&owner_vk()), Ok(()));
+        let out = run_update(
+            InboxShard::default(),
+            vec![delta_item(&InboxDelta::Notifs(vec![n]))],
+        );
+        assert!(out.notifs.is_empty());
+    }
+
+    #[test]
+    fn oversized_writer_cert_rejected() {
+        // writer_cert is excluded from the signing payload (it is not yet a
+        // verified credential), so it can be attached AFTER signing without
+        // invalidating the signature — no keypair of one's own is needed, only
+        // a valid notification to relay with a new cert bolted on. Only
+        // `verify_writer_cert`'s size bound stops this from being an
+        // unbounded write primitive on an anyone-writes inbox.
+        let mut n = signed_notif([2u8; 32], NotifKind::Reply, "p", 1);
+        assert_eq!(n.verify(&owner_vk()), Ok(()));
+        n.writer_cert = Some(WriterCert {
+            cert: vec![0u8; freenet_microblogging_common::thread::MAX_WRITER_CERT_LEN + 1],
+        });
+        // Tampering writer_cert after signing must NOT break the signature.
+        assert_eq!(n.verify(&owner_vk()), Ok(()));
+
+        let out = run_update(
+            InboxShard::default(),
+            vec![delta_item(&InboxDelta::Notifs(vec![n]))],
+        );
+        assert!(out.notifs.is_empty());
     }
 
     #[test]
