@@ -95,7 +95,23 @@ fn put(buf: &mut Vec<u8>, field: &[u8]) {
     buf.extend_from_slice(field);
 }
 
+/// Maximum length of `ref_id`, in UTF-8 bytes. Meant to hold a content-addressed
+/// post id (hex of a 32-byte blake3 hash = 64 chars); this is double that as a
+/// margin, matching [`crate::post::MAX_POST_REF_LEN`].
+pub const MAX_REF_ID_LEN: usize = 128;
+
 impl Notification {
+    /// Whether `ref_id` is within its bound.
+    ///
+    /// A signature proves who sent this notification, not that it is benign —
+    /// the sender picks `ref_id` freely and signs whatever they picked. An
+    /// inbox is anyone-writes (any party may deliver a notification to a
+    /// user's inbox), so an unbounded `ref_id` is an unbounded write primitive
+    /// available to anyone, same as an unbounded `Post::author_name` would be.
+    pub fn within_bounds(&self) -> bool {
+        self.ref_id.len() <= MAX_REF_ID_LEN
+    }
+
     /// Bytes signed/verified: domain tag, **recipient VK** (binds to one inbox),
     /// kind tag, sender, ref_id, seq. `signature` and `writer_cert` are excluded
     /// (the signature is derived from this; the cert is a separate credential).

@@ -42,7 +42,7 @@
 //!   never by arrival order, which would diverge. Over-cap eviction is
 //!   best-effort lossy, the same trade-off as the post window.
 
-use freenet_microblogging_common::post::{MAX_CONTENT_LEN, Post};
+use freenet_microblogging_common::post::Post;
 use freenet_microblogging_common::signed_op::{OpType, Profile, SignedOp, USER_SHARD_CONTEXT};
 use freenet_stdlib::prelude::{
     blake3::{Hasher as Blake3, traits::digest::Digest},
@@ -139,9 +139,7 @@ fn post_hash(post: &Post) -> [u8; 32] {
 /// A post is acceptable iff within the length bound, self-verifying, and authored
 /// by this shard's owner (owner-writes — ADR-0001).
 fn post_is_acceptable(post: &Post, owner_vk_hex: &str) -> bool {
-    post.content.len() <= MAX_CONTENT_LEN
-        && post.author_pubkey == owner_vk_hex
-        && post.verify().is_ok()
+    post.within_bounds() && post.author_pubkey == owner_vk_hex && post.verify().is_ok()
 }
 
 /// Deterministic "newest-first" ordering for the retention window: timestamp
@@ -669,6 +667,25 @@ mod test {
         );
         let shard: UserShard = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(shard.posts.len(), 1);
+    }
+
+    #[test]
+    fn oversized_author_name_rejected_even_from_owner() {
+        // author_name/author_handle are author-chosen and self-verifying, so a
+        // signature alone does not bound them — only `within_bounds()` does.
+        // Owner-writes doesn't help: the owner can still sign an oversized name.
+        let owner = [1u8; 32];
+        let mut p = signed_post(owner, "hi", 1);
+        p.author_name = "x".repeat(freenet_microblogging_common::post::MAX_AUTHOR_NAME_LEN + 1);
+        p.id = p.compute_id();
+        let sk = MlDsa65::from_seed(&owner.into());
+        let sig: ml_dsa::Signature<MlDsa65> = sk.sign(&p.signing_payload());
+        p.signature = Some(hex::encode(sig.encode()));
+        assert_eq!(p.verify(), Ok(()));
+
+        let bytes = apply(owner, empty_state(), vec![ShardDelta::Posts(vec![p])]);
+        let shard: UserShard = serde_json::from_slice(&bytes).unwrap();
+        assert!(shard.posts.is_empty());
     }
 
     #[test]

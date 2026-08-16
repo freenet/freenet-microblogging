@@ -57,6 +57,27 @@ pub struct WriterCert {
     pub cert: Vec<u8>,
 }
 
+/// Maximum length of `WriterCert.cert`, in bytes. `cert` is excluded from
+/// every record's signing payload (it is not yet a verified credential), so
+/// it is also not authenticated — a record can be relayed with its cert bytes
+/// swapped out without invalidating the signature. That makes it strictly
+/// easier to abuse than a signed-but-unbounded field: no keypair is needed at
+/// all, just a valid record to relay with a new `cert` attached. Every record
+/// type that embeds a `WriterCert` (`LikeRecord`, `RepostRecord`, `QuoteRef`,
+/// `Notification`) is anyone-writes, so an unbounded cert is an unbounded
+/// write primitive available to anyone who can observe one valid record.
+pub const MAX_WRITER_CERT_LEN: usize = 4096;
+
+impl WriterCert {
+    /// Whether `cert` is within its bound. Deliberately independent of
+    /// whether the credential itself is considered valid — bounding size is a
+    /// storage-amplification guard, not a step toward the GhostKey
+    /// verification `verify_writer_cert` still reserves the slot for.
+    pub fn within_bounds(&self) -> bool {
+        self.cert.len() <= MAX_WRITER_CERT_LEN
+    }
+}
+
 /// A signed "like" of the thread's root post by `signer_pubkey`.
 ///
 /// Convergence on the thread shard is per-liker: `seq` carries a monotonic
@@ -187,6 +208,17 @@ impl LikeRecord {
 }
 
 impl QuoteRef {
+    /// Whether `quote_post_id` is within its bound. It is signer-chosen and
+    /// signed (see `signing_payload`), so the signature does not bound it —
+    /// only this does. `quote_post_id` is also the map key the thread shard
+    /// stores quotes under, so an oversized value is both a storage-blowup
+    /// primitive and an oversized key. Same class as `Post::reply_to` /
+    /// `Post::quoted_post`; reuses their bound since both hold a
+    /// content-addressed post id.
+    pub fn within_bounds(&self) -> bool {
+        self.quote_post_id.len() <= crate::post::MAX_POST_REF_LEN
+    }
+
     /// Bytes signed/verified: domain tag, **root post id** (binds to thread),
     /// signer, quote_post_id. `signature` excluded (derived from this).
     pub fn signing_payload(&self, root_post_id: &str) -> Vec<u8> {

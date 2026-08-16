@@ -46,7 +46,7 @@
 //! wants a strictly top-level timeline must filter on `reply_to.is_empty()` at
 //! render time rather than assume the index is reply-free.
 
-use freenet_microblogging_common::post::{MAX_CONTENT_LEN, Post};
+use freenet_microblogging_common::post::Post;
 use freenet_microblogging_common::thread::WriterCert;
 use freenet_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -126,7 +126,7 @@ fn verify_writer_cert(_cert: Option<&WriterCert>) -> bool {
 /// check — the global index is a flat firehose, so any self-verifying post is
 /// eligible regardless of whether it is a reply, quote, or top-level post.
 fn post_is_acceptable(post: &Post) -> bool {
-    post.content.len() <= MAX_CONTENT_LEN && post.verify().is_ok() && verify_writer_cert(None)
+    post.within_bounds() && post.verify().is_ok() && verify_writer_cert(None)
 }
 
 /// Truncate posts to the newest `MAX_INDEX_POSTS` by `(timestamp, id)` desc — a
@@ -337,6 +337,7 @@ struct GlobalIndexStateDelta {
 #[cfg(test)]
 mod test {
     use super::*;
+    use freenet_microblogging_common::post::MAX_CONTENT_LEN;
     use ml_dsa::KeyGen;
     use ml_dsa::signature::{Keypair, Signer};
     use ml_dsa::{MlDsa65, Signature};
@@ -436,6 +437,44 @@ mod test {
         // Sign it honestly so only the length bound can reject it.
         let big = "x".repeat(MAX_CONTENT_LEN + 1);
         let p = signed_post([1u8; 32], &big, 100);
+        assert_eq!(p.verify(), Ok(()));
+        let out = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Posts(vec![p]))],
+        );
+        assert!(out.posts.is_empty());
+    }
+
+    #[test]
+    fn oversized_author_name_rejected() {
+        // author_name/author_handle are author-chosen and self-verifying, so a
+        // signature alone does not bound them — only `within_bounds()` does.
+        // The global index is the most widely replicated state in the system,
+        // so an unbounded write here is an unbounded write primitive.
+        let mut p = signed_post([1u8; 32], "hi", 100);
+        p.author_name = "x".repeat(freenet_microblogging_common::post::MAX_AUTHOR_NAME_LEN + 1);
+        p.id = p.compute_id();
+        let sk = MlDsa65::from_seed(&[1u8; 32].into());
+        let sig: Signature<MlDsa65> = sk.sign(&p.signing_payload());
+        p.signature = Some(hex::encode(sig.encode()));
+        assert_eq!(p.verify(), Ok(()));
+        let out = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Posts(vec![p]))],
+        );
+        assert!(out.posts.is_empty());
+    }
+
+    #[test]
+    fn oversized_quoted_post_ref_rejected() {
+        // reply_to/quoted_post are just as author-chosen as author_name — a
+        // signature alone does not bound them either.
+        let mut p = signed_post([1u8; 32], "hi", 100);
+        p.quoted_post = "x".repeat(freenet_microblogging_common::post::MAX_POST_REF_LEN + 1);
+        p.id = p.compute_id();
+        let sk = MlDsa65::from_seed(&[1u8; 32].into());
+        let sig: Signature<MlDsa65> = sk.sign(&p.signing_payload());
+        p.signature = Some(hex::encode(sig.encode()));
         assert_eq!(p.verify(), Ok(()));
         let out = run_update(
             GlobalIndexShard::default(),
