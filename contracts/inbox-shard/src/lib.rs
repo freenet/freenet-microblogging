@@ -477,6 +477,19 @@ impl ContractInterface for InboxShard {
                 return Err(ContractError::InvalidState);
             }
         }
+        // Deliberately does NOT check `prune_op_is_acceptable` here, and that
+        // asymmetry with the acceptance paths is the point — do NOT "fix" it by
+        // adding the bound. Prune ops already exist in DEPLOYED inbox state, so
+        // a ceiling enforced here could declare an already-stored op invalid and
+        // strand a live inbox. Refusing new oversized ops while continuing to
+        // accept existing states is the safe direction; the invariant that must
+        // hold is only that `update_state` never PRODUCES a state this would
+        // reject, which stays true when update is the stricter of the two.
+        //
+        // Keying by `seq` here is a known convergence defect (raven#66), left in
+        // place for the same reason: re-keying is a breaking wire change that
+        // needs a migration. Retraction could be re-keyed freely because it had
+        // never shipped; this had.
         for (seq, op) in &shard.prune_ids_ops {
             if op.op_type != OpType::PruneIds
                 || op.seq != *seq
