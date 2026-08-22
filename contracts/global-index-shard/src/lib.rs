@@ -101,11 +101,20 @@ struct GlobalIndexShard {
     /// serialization).
     #[serde(default)]
     posts: BTreeMap<String, Post>,
-    /// Retraction ops keyed by op `seq`. Each is signed by SOME key; which posts
-    /// it may withdraw is decided per-post, not per-op — see
-    /// [`post_is_retracted`].
+    /// Retraction ops keyed by CONTENT ADDRESS (`SignedOp::content_id`), never
+    /// by `seq`. Each is signed by SOME key; which posts it may withdraw is
+    /// decided per-post, not per-op — see [`post_is_retracted`].
+    ///
+    /// The key must be the content address because this is an anyone-writes
+    /// surface and `seq` is client-chosen: keyed by `seq`, two different
+    /// signers' ops collide, whichever arrived first wins on each replica, and
+    /// the replicas diverge permanently (the summary below would report "I have
+    /// seq 5" for two different ops, so sync never ships the missing one). It is
+    /// also a censorship primitive — file a throwaway op at a victim's seq and
+    /// their retraction is dropped wherever it lands second. See
+    /// [`SignedOp::content_id`].
     #[serde(default)]
-    retract_ops: BTreeMap<u64, SignedOp>,
+    retract_ops: BTreeMap<String, SignedOp>,
 }
 
 impl<'a> TryFrom<State<'a>> for GlobalIndexShard {
@@ -195,7 +204,10 @@ fn apply_index_delta(shard: &mut GlobalIndexShard, delta: GlobalIndexDelta) {
         }
         GlobalIndexDelta::Retract(op) => {
             if retract_op_is_acceptable(&op) {
-                shard.retract_ops.entry(op.seq).or_insert(op);
+                shard
+                    .retract_ops
+                    .entry(op.content_id(GLOBAL_INDEX_CONTEXT))
+                    .or_insert(op);
             }
         }
     }
@@ -209,7 +221,14 @@ fn apply_index_delta(shard: &mut GlobalIndexShard, delta: GlobalIndexDelta) {
 /// only when it is matched against a specific post. Retaining an op says
 /// "somebody signed this", never "this is authorized".
 fn retract_op_is_acceptable(op: &SignedOp) -> bool {
-    if op.op_type != OpType::RetractPost || decode_id_list(&op.payload).is_empty() {
+    // `within_bounds` before anything else: this is an anyone-writes surface
+    // with no owner check, so the payload's SIZE is attacker-chosen and a
+    // signature does not bound it. `decode_id_list` caps what it INTERPRETS at
+    // MAX_IDS_PER_OP, which says nothing about how many bytes get stored.
+    if op.op_type != OpType::RetractPost
+        || !op.within_bounds()
+        || decode_id_list(&op.payload).is_empty()
+    {
         return false;
     }
     // Self-verify: the signer field must match the signature over the payload.
@@ -261,9 +280,20 @@ fn gc_retract_ops(shard: &mut GlobalIndexShard) {
         return;
     }
     let excess = shard.retract_ops.len() - MAX_RETRACT_OPS;
-    let stale: Vec<u64> = shard.retract_ops.keys().copied().take(excess).collect();
-    for seq in stale {
-        shard.retract_ops.remove(&seq);
+    // Keys are content addresses, so map order is hash order, not seq order —
+    // hence the explicit sort on `(seq, key)`. What convergence needs is only
+    // that the order be TOTAL and agreed on by every replica holding the same
+    // set; oldest-first is the intent layered on top, and it is exact except
+    // between ops sharing a `seq`, where the tie-break is arbitrary but
+    // identical everywhere.
+    let mut by_age: Vec<(u64, String)> = shard
+        .retract_ops
+        .iter()
+        .map(|(k, op)| (op.seq, k.clone()))
+        .collect();
+    by_age.sort();
+    for (_, key) in by_age.into_iter().take(excess) {
+        shard.retract_ops.remove(&key);
     }
 }
 
@@ -302,7 +332,10 @@ fn apply_state_delta(shard: &mut GlobalIndexShard, sd: GlobalIndexStateDelta) {
     // same sync delta never lands as live.
     for op in sd.retractions {
         if retract_op_is_acceptable(&op) {
-            shard.retract_ops.entry(op.seq).or_insert(op);
+            shard
+                .retract_ops
+                .entry(op.content_id(GLOBAL_INDEX_CONTEXT))
+                .or_insert(op);
         }
     }
     for post in sd.posts {
@@ -320,9 +353,15 @@ fn apply_state_delta(shard: &mut GlobalIndexShard, sd: GlobalIndexStateDelta) {
 fn merge_state(shard: &mut GlobalIndexShard, other: GlobalIndexShard) {
     // Retractions merge FIRST, so a post arriving in the same merge as its own
     // withdrawal never survives it.
-    for (seq, op) in other.retract_ops {
+    // Re-derive the key from the op rather than trusting `other`'s: a peer
+    // could otherwise file a valid op under a key that is not its content
+    // address, which `validate_state` would then reject as a misfiled op.
+    for (_, op) in other.retract_ops {
         if retract_op_is_acceptable(&op) {
-            shard.retract_ops.entry(seq).or_insert(op);
+            shard
+                .retract_ops
+                .entry(op.content_id(GLOBAL_INDEX_CONTEXT))
+                .or_insert(op);
         }
     }
     for (id, post) in other.posts {
@@ -354,8 +393,8 @@ impl ContractInterface for GlobalIndexShard {
         // Retractions: each retained op must be internally consistent and filed
         // under its own seq. An inconsistent or misfiled op is rejected outright,
         // so a peer cannot ship a state whose tombstones it did not sign.
-        for (seq, op) in &shard.retract_ops {
-            if op.seq != *seq || !retract_op_is_acceptable(op) {
+        for (key, op) in &shard.retract_ops {
+            if *key != op.content_id(GLOBAL_INDEX_CONTEXT) || !retract_op_is_acceptable(op) {
                 return Err(ContractError::InvalidState);
             }
         }
@@ -407,7 +446,7 @@ impl ContractInterface for GlobalIndexShard {
         // requester is missing. Keys are deterministic (BTreeMap order).
         let summary = GlobalIndexSummary {
             posts: shard.posts.keys().cloned().collect(),
-            retractions: shard.retract_ops.keys().copied().collect(),
+            retractions: shard.retract_ops.keys().cloned().collect(),
         };
         let bytes =
             serde_json::to_vec(&summary).map_err(|e| ContractError::Other(format!("{e}")))?;
@@ -433,12 +472,12 @@ impl ContractInterface for GlobalIndexShard {
             .map(|(_, p)| p.clone())
             .collect();
 
-        let have_retractions: std::collections::HashSet<u64> =
-            have.retractions.iter().copied().collect();
+        let have_retractions: std::collections::HashSet<&String> =
+            have.retractions.iter().collect();
         let missing_retractions: Vec<SignedOp> = shard
             .retract_ops
             .iter()
-            .filter(|(seq, _)| !have_retractions.contains(seq))
+            .filter(|(key, _)| !have_retractions.contains(key))
             .map(|(_, op)| op.clone())
             .collect();
 
@@ -457,11 +496,16 @@ impl ContractInterface for GlobalIndexShard {
 struct GlobalIndexSummary {
     #[serde(default)]
     posts: Vec<String>,
-    /// Op seqs of retained retractions. Without these a peer holding a
-    /// withdrawal we lack would summarize identically and never send it, so the
-    /// post would stay live here after its author withdrew it.
+    /// Content addresses of retained retractions. Without these a peer holding
+    /// a withdrawal we lack would summarize identically and never send it, so
+    /// the post would stay live here after its author withdrew it.
+    ///
+    /// Content addresses, not seqs, for the reason the state map is keyed that
+    /// way: two different ops sharing a seq would summarize as the same entry,
+    /// so each side would believe the other already had it and neither would
+    /// ever ship it — permanent divergence that looks like successful sync.
     #[serde(default)]
-    retractions: Vec<u64>,
+    retractions: Vec<String>,
 }
 
 /// The delta `get_state_delta` ships: the missing posts, each a full
@@ -923,9 +967,10 @@ mod test {
         let id = p.id.clone();
         let mut shard = GlobalIndexShard::default();
         shard.posts.insert(p.id.clone(), p);
+        let op = retract_op_by(author, &[&id], 1);
         shard
             .retract_ops
-            .insert(1, retract_op_by(author, &[&id], 1));
+            .insert(op.content_id(GLOBAL_INDEX_CONTEXT), op);
 
         assert!(
             GlobalIndexShard::validate_state(
@@ -968,6 +1013,198 @@ mod test {
             ))],
         );
         assert!(b2.posts.is_empty(), "peer kept a post its author withdrew");
+    }
+
+    // -- retraction ops are keyed by CONTENT ADDRESS, not by `seq` --
+    //
+    // `seq` is client-chosen (`Date.now()`) and is NOT scoped to the signer,
+    // and this is an anyone-writes surface. Keyed by `seq`, two different
+    // signers' ops collide in one map slot, `or_insert` keeps whichever landed
+    // first, and replicas that saw them in different orders keep different ops
+    // — permanent divergence that `validate_state` cannot see, because each
+    // replica is internally self-consistent. It is also a censorship
+    // primitive. These tests fail if the key reverts to `seq`.
+
+    #[test]
+    fn two_signers_retracting_at_the_same_seq_both_survive() {
+        let alice = [1u8; 32];
+        let bob = [2u8; 32];
+        let pa = signed_post(alice, "alice regrets this", 100);
+        let pb = signed_post(bob, "bob regrets this", 101);
+        let (ida, idb) = (pa.id.clone(), pb.id.clone());
+
+        // The SAME seq for both — the collision the old `seq` key could not
+        // survive.
+        let shard = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Posts(vec![pa, pb])),
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(alice, &[&ida], 7))),
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(bob, &[&idb], 7))),
+            ],
+        );
+
+        assert_eq!(
+            shard.retract_ops.len(),
+            2,
+            "one signer's retraction displaced the other's"
+        );
+        assert!(
+            shard.posts.is_empty(),
+            "a post survived its own author's withdrawal"
+        );
+    }
+
+    #[test]
+    fn a_stranger_cannot_block_a_retraction_by_squatting_its_seq() {
+        // The censorship shape: an attacker who sees (or guesses) the seq a
+        // victim is about to use files a throwaway self-signed op at that seq
+        // FIRST. Under `seq` keying, `or_insert` then silently drops the
+        // victim's real retraction on every replica the attacker reached first,
+        // so the post they tried to withdraw stays live forever.
+        let victim = [1u8; 32];
+        let attacker = [9u8; 32];
+        let p = signed_post(victim, "please take this down", 100);
+        let id = p.id.clone();
+
+        let shard = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Posts(vec![p])),
+                // Attacker gets there first, same seq, naming an unrelated id.
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(
+                    attacker,
+                    &["unrelated-id"],
+                    42,
+                ))),
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(
+                    victim,
+                    &[&id],
+                    42,
+                ))),
+            ],
+        );
+
+        assert!(
+            shard.posts.is_empty(),
+            "a squatted seq blocked the author's own withdrawal"
+        );
+    }
+
+    #[test]
+    fn colliding_seq_retractions_converge_regardless_of_arrival_order() {
+        // The convergence property directly: the same two ops applied in
+        // opposite orders must produce byte-identical state. Under `seq`
+        // keying each order keeps a DIFFERENT op, and neither replica can tell.
+        let alice = [1u8; 32];
+        let bob = [2u8; 32];
+        let a_op = retract_op_by(alice, &["id-a"], 7);
+        let b_op = retract_op_by(bob, &["id-b"], 7);
+
+        let ab = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Retract(a_op.clone())),
+                delta_item(&GlobalIndexDelta::Retract(b_op.clone())),
+            ],
+        );
+        let ba = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Retract(b_op)),
+                delta_item(&GlobalIndexDelta::Retract(a_op)),
+            ],
+        );
+
+        assert_eq!(
+            serde_json::to_vec(&ab).unwrap(),
+            serde_json::to_vec(&ba).unwrap(),
+            "arrival order changed the retained retraction set"
+        );
+    }
+
+    #[test]
+    fn colliding_seq_retractions_both_travel_over_the_sync_delta() {
+        // The summary half of the same bug. Summarized by `seq`, a replica
+        // holding op_A@7 and a peer holding op_B@7 each report "I have 7", so
+        // each believes the other is already up to date and neither ever ships
+        // its op — the divergence is invisible AND unrecoverable.
+        let alice = [1u8; 32];
+        let bob = [2u8; 32];
+
+        let a = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Retract(retract_op_by(
+                alice,
+                &["id-a"],
+                7,
+            )))],
+        );
+        let b = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Retract(retract_op_by(
+                bob,
+                &["id-b"],
+                7,
+            )))],
+        );
+        assert_eq!(a.retract_ops.len(), 1);
+        assert_eq!(b.retract_ops.len(), 1);
+
+        let b_summary = GlobalIndexShard::summarize_state(params(), state_of(&b)).unwrap();
+        let d = GlobalIndexShard::get_state_delta(params(), state_of(&a), b_summary).unwrap();
+        let b2 = run_update(
+            b,
+            vec![UpdateData::Delta(StateDelta::from(d.into_bytes().to_vec()))],
+        );
+
+        assert_eq!(
+            b2.retract_ops.len(),
+            2,
+            "sync never shipped the op the peer was missing"
+        );
+    }
+
+    #[test]
+    fn an_oversized_retraction_payload_is_rejected() {
+        // `decode_id_list` caps what it INTERPRETS at MAX_IDS_PER_OP; it says
+        // nothing about how many BYTES get stored. On an anyone-writes surface
+        // with no owner check, and with ML-DSA signing a message of any length,
+        // only an explicit ceiling stops a freshly-generated keypair from
+        // parking megabytes in the most-replicated state in the system. Same
+        // class as GHSA-qxwp-8hqx-4wrj.
+        use freenet_microblogging_common::signed_op::{MAX_OP_PAYLOAD_LEN, encode_id_list};
+
+        let sk = MlDsa65::from_seed(&[3u8; 32].into());
+        // Well-formed and decodable, just far too many entries to store.
+        let ids: Vec<String> = (0..40_000).map(|i| format!("id-{i:0>100}")).collect();
+        let mut o = SignedOp {
+            op_type: OpType::RetractPost,
+            payload: encode_id_list(&ids),
+            seq: 1,
+            signer_pubkey: hex::encode(sk.verifying_key().encode()),
+            signature: None,
+        };
+        let sig: ml_dsa::Signature<MlDsa65> = sk.sign(&o.signing_payload(GLOBAL_INDEX_CONTEXT));
+        o.signature = Some(hex::encode(sig.encode()));
+
+        assert!(o.payload.len() > MAX_OP_PAYLOAD_LEN);
+        // The bound is NOT redundant with the signature: this op is
+        // cryptographically valid, and it decodes to a non-empty id list.
+        assert!(
+            o.verify(GLOBAL_INDEX_CONTEXT, &o.signer_pubkey.clone())
+                .is_ok()
+        );
+        assert!(!decode_id_list(&o.payload).is_empty());
+
+        let shard = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Retract(o))],
+        );
+        assert!(
+            shard.retract_ops.is_empty(),
+            "an unbounded payload was stored in replicated state"
+        );
     }
 }
 

@@ -161,7 +161,56 @@ impl SignedOp {
         vk.verify(&self.signing_payload(context), &sig)
             .map_err(|_| VerifyError::SignatureInvalid)
     }
+
+    /// Whether `payload` is within its bound.
+    ///
+    /// [`MAX_IDS_PER_OP`] and [`MAX_ID_LEN`] bound what [`decode_id_list`] will
+    /// *interpret*, not what the op *carries*: a payload of a million
+    /// well-formed entries decodes to 1000 ids while the whole blob is still
+    /// stored verbatim in replicated contract state. A signature does not bound
+    /// it either — ML-DSA-65 signs a message of any length, so an oversized
+    /// payload is perfectly valid and perfectly storable. Only this does.
+    ///
+    /// Same class as [`Post::within_bounds`](crate::post::Post::within_bounds),
+    /// and it matters most on the global index, where retraction ops are
+    /// accepted from *any* signer: there is no owner check to fall back on, so
+    /// an unbounded payload there is an unbounded write primitive available to
+    /// anyone with a freshly generated keypair.
+    pub fn within_bounds(&self) -> bool {
+        self.payload.len() <= MAX_OP_PAYLOAD_LEN
+    }
+
+    /// Content address of this op: BLAKE3 over the exact bytes the signature
+    /// covers, hex-encoded.
+    ///
+    /// This is what retraction maps are keyed by, and the reason is
+    /// convergence, not tidiness. Keying by `seq` alone does not work: `seq` is
+    /// chosen client-side and is not scoped to the signer, so two *different*
+    /// ops can land on the same key. Whichever reached a replica first would
+    /// win there, so replicas that saw them in different orders would keep
+    /// different ops — a state that no `validate_state` can detect, because
+    /// each replica is internally self-consistent. On the global index, where
+    /// any key may sign a retraction, that also hands an attacker a censorship
+    /// primitive: file a throwaway op at the seq a victim is about to use and
+    /// their real retraction is dropped everywhere it arrives second.
+    ///
+    /// A content address cannot collide across distinct ops and is necessarily
+    /// identical for identical ones, which is exactly the union-by-key
+    /// behaviour a grow-only set needs. `context` is included because it is
+    /// part of the signed bytes: the same op is a different op on a different
+    /// shard type.
+    pub fn content_id(&self, context: &[u8]) -> String {
+        hex::encode(blake3::hash(&self.signing_payload(context)).as_bytes())
+    }
 }
+
+/// Maximum byte length of [`SignedOp::payload`].
+///
+/// Sized as the largest legitimate [`encode_id_list`] payload: [`MAX_IDS_PER_OP`]
+/// entries, each a `u32` length prefix plus at most [`MAX_ID_LEN`] bytes. An op
+/// larger than that cannot decode to anything the contracts will act on, so
+/// there is no honest reason to carry it — and every dishonest one.
+pub const MAX_OP_PAYLOAD_LEN: usize = MAX_IDS_PER_OP * (4 + MAX_ID_LEN);
 
 /// Maximum length of a single id in an [`encode_id_list`] payload.
 pub const MAX_ID_LEN: usize = 128;

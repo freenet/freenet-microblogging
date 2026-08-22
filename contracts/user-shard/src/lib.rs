@@ -103,8 +103,16 @@ struct UserShard {
     /// a state naming every one of the owner's posts as retracted and erase
     /// them. Keeping the op means a retraction is only ever as good as the owner's
     /// signature over it.
+    ///
+    /// Keyed by CONTENT ADDRESS ([`SignedOp::content_id`]), never by `seq`.
+    /// `seq` is client-chosen (`Date.now()`), and some browsers clamp timer
+    /// resolution, so an owner retracting two different posts in quick
+    /// succession can sign two ops sharing one `seq`. Keyed by `seq`, the
+    /// second silently displaces the first, and the post the first one named
+    /// comes BACK on the next merge with a replica that still holds it — the
+    /// tombstone is the memory, so losing it un-retracts the post.
     #[serde(default)]
-    retract_ops: BTreeMap<u64, SignedOp>,
+    retract_ops: BTreeMap<String, SignedOp>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -281,10 +289,18 @@ fn apply_op(shard: &mut UserShard, op: &SignedOp, owner: &str) -> bool {
             // Union by op seq; an identical op dedupes. A peer cannot fabricate
             // one (it would not verify against the owner), so this is a grow-set
             // of genuine owner-signed retractions.
-            if decode_id_list(&op.payload).is_empty() {
+            if !op.within_bounds() || decode_id_list(&op.payload).is_empty() {
                 return false;
             }
-            shard.retract_ops.insert(op.seq, op.clone());
+            // `or_insert` on a content-address key, matching the merge path
+            // exactly. Two distinct ops can no longer collide, and an identical
+            // op is idempotent, so both paths converge on the same set — the
+            // asymmetry between `insert` here and `or_insert` in `merge_state`
+            // was itself order-dependence.
+            shard
+                .retract_ops
+                .entry(op.content_id(USER_SHARD_CONTEXT))
+                .or_insert_with(|| op.clone());
             // Apply immediately so the post disappears on this write, not only
             // after the next merge.
             apply_retractions(shard);
@@ -324,12 +340,28 @@ fn merge_state(shard: &mut UserShard, other: UserShard, owner: &str) {
     // Follows: higher seq wins per key, with the same equal-seq tie-break as
     // apply_op so a delta-applied state and a full-state merge converge. The cap
     // is applied deterministically post-merge in `truncate_follows`, not here.
-    // Retractions union by op seq. Each is owner-signed, so a peer cannot inject
-    // one; merging them BEFORE the post window is normalized means a post that
-    // arrives in the same merge as its own retraction never survives it.
-    for (seq, op) in other.retract_ops {
-        if op.verify(USER_SHARD_CONTEXT, owner).is_ok() {
-            shard.retract_ops.entry(seq).or_insert(op);
+    // Retractions union by content address. Each is owner-signed, so a peer
+    // cannot inject one; merging them BEFORE the post window is normalized
+    // means a post that arrives in the same merge as its own retraction never
+    // survives it.
+    //
+    // The `op_type` check is not redundant with the signature. A peer sees the
+    // owner's OTHER signed ops (a Profile, a Follow) on this very shard, and
+    // nothing stops it filing one of them into `retract_ops` in a full-state
+    // merge — it verifies, because it genuinely is owner-signed. Accepting it
+    // would build a state that this contract's own `validate_state` rejects,
+    // which is the one disagreement a contract must never produce.
+    //
+    // The key is re-derived rather than taken from `other`, for the same
+    // reason: a peer could otherwise file a valid op under a key that is not
+    // its content address, and `validate_state` would reject that too.
+    for (_, op) in other.retract_ops {
+        if op.op_type == OpType::RetractPost
+            && op.within_bounds()
+            && op.verify(USER_SHARD_CONTEXT, owner).is_ok()
+        {
+            let key = op.content_id(USER_SHARD_CONTEXT);
+            shard.retract_ops.entry(key).or_insert(op);
         }
     }
     for (target, other_fs) in other.follows {
@@ -374,16 +406,26 @@ fn apply_retractions(shard: &mut UserShard) {
 /// Bound the retained retraction ops. Pure grow-set — dropping a tombstone lets
 /// a replica that still holds the post re-introduce it on the next merge, so
 /// there is no sound GC, only this backstop. Evict the LOWEST seqs (oldest
-/// retractions) first; `BTreeMap` is already seq-ordered, so every replica
-/// evicts the identical set regardless of arrival order.
+/// retractions) first, breaking same-seq ties on the content address. Keys are
+/// content addresses, so map order is hash order rather than seq order — hence
+/// the explicit sort on `(seq, key)`. What convergence actually needs is only
+/// that the order be TOTAL and agreed on by every replica holding the same set;
+/// oldest-first is the intent layered on top of that, and it is exact except
+/// between ops that share a `seq`, where the tie-break is arbitrary but
+/// identical everywhere.
 fn gc_retract_ops(shard: &mut UserShard) {
     if shard.retract_ops.len() <= MAX_RETRACT_OPS {
         return;
     }
     let excess = shard.retract_ops.len() - MAX_RETRACT_OPS;
-    let stale: Vec<u64> = shard.retract_ops.keys().copied().take(excess).collect();
-    for seq in stale {
-        shard.retract_ops.remove(&seq);
+    let mut by_age: Vec<(u64, String)> = shard
+        .retract_ops
+        .iter()
+        .map(|(k, op)| (op.seq, k.clone()))
+        .collect();
+    by_age.sort();
+    for (_, key) in by_age.into_iter().take(excess) {
+        shard.retract_ops.remove(&key);
     }
 }
 
@@ -516,9 +558,10 @@ impl ContractInterface for UserShard {
         // otherwise a peer could file an op under a seq that collides with a real
         // one and displace it. This is the check that makes a retraction
         // only ever as strong as the owner's key.
-        for (seq, op) in &shard.retract_ops {
+        for (key, op) in &shard.retract_ops {
             if op.op_type != OpType::RetractPost
-                || op.seq != *seq
+                || !op.within_bounds()
+                || *key != op.content_id(USER_SHARD_CONTEXT)
                 || op.verify(USER_SHARD_CONTEXT, &owner).is_err()
             {
                 return Ok(ValidateResult::Invalid);
@@ -1669,25 +1712,210 @@ mod integration {
         let id = post.id.clone();
         let mut shard = UserShard::default();
         shard.posts.push(post);
-        shard.retract_ops.insert(1, retract_op(&[&id], 1));
+        let op = retract_op(&[&id], 1);
+        shard
+            .retract_ops
+            .insert(op.content_id(USER_SHARD_CONTEXT), op);
         assert!(!validate(&shard), "live post survived its own retraction");
     }
 
     #[test]
-    fn validate_rejects_a_retraction_filed_under_a_mismatched_seq() {
-        // Filing a genuine op under a different seq is how a peer would try to
-        // collide with, and displace, another retraction.
+    fn validate_rejects_a_retraction_filed_under_a_key_that_is_not_its_content_address() {
+        // Filing a genuine op under some other key is how a peer would try to
+        // collide with, and displace, another retraction. Keying by content
+        // address is what makes that impossible, and this pins that the key is
+        // actually CHECKED rather than merely computed on the write path.
         let mut shard = UserShard::default();
-        shard.retract_ops.insert(77, retract_op(&["some-id"], 1));
+        shard.retract_ops.insert(
+            "not-a-content-address".to_string(),
+            retract_op(&["some-id"], 1),
+        );
         assert!(!validate(&shard));
+    }
+
+    // -- retraction ops are keyed by CONTENT ADDRESS, not by `seq` --
+    //
+    // This shard is owner-writes, so the collision here is same-owner: `seq` is
+    // `Date.now()` chosen per call with no persisted counter, and browsers that
+    // clamp timer resolution (Tor Browser clamps to 100ms) make two retractions
+    // seconds apart share one `seq` routinely. Keyed by `seq`, the second op
+    // displaces the first and the post the FIRST one named comes back on the
+    // next merge with a replica that still holds it — the tombstone IS the
+    // memory, so losing it un-retracts the post.
+
+    #[test]
+    fn two_retractions_at_the_same_seq_both_keep_their_tombstones() {
+        let p1 = signed_post("first regret", 1_000);
+        let p2 = signed_post("second regret", 1_001);
+        let (id1, id2) = (p1.id.clone(), p2.id.clone());
+
+        let shard = apply(
+            &UserShard::default(),
+            vec![
+                ShardDelta::Posts(vec![p1, p2]),
+                // Same seq for both — the clamped-clock case.
+                ShardDelta::Op(retract_op(&[&id1], 5)),
+                ShardDelta::Op(retract_op(&[&id2], 5)),
+            ],
+        );
+
+        assert_eq!(
+            shard.retract_ops.len(),
+            2,
+            "the second retraction displaced the first one's tombstone"
+        );
+        assert!(shard.posts.is_empty(), "a retracted post survived");
+    }
+
+    #[test]
+    fn a_post_retracted_at_a_colliding_seq_does_not_come_back_on_merge() {
+        // The consequence that actually hurts. The local replica retracts two
+        // posts at one seq; a peer never heard of either retraction and still
+        // holds both posts. On merge, any tombstone that was displaced no
+        // longer names its post, so the peer's copy is unioned back in and the
+        // withdrawn post is live again.
+        let p1 = signed_post("first regret", 1_000);
+        let p2 = signed_post("second regret", 1_001);
+        let (id1, id2) = (p1.id.clone(), p2.id.clone());
+
+        let peer = apply(
+            &UserShard::default(),
+            vec![ShardDelta::Posts(vec![p1.clone(), p2.clone()])],
+        );
+        assert_eq!(peer.posts.len(), 2);
+
+        let local = apply(
+            &UserShard::default(),
+            vec![
+                ShardDelta::Posts(vec![p1, p2]),
+                ShardDelta::Op(retract_op(&[&id1], 5)),
+                ShardDelta::Op(retract_op(&[&id2], 5)),
+            ],
+        );
+        assert!(local.posts.is_empty());
+
+        let merged = sync_into(&local, &peer);
+        assert!(
+            merged.posts.is_empty(),
+            "a withdrawn post was resurrected by a peer that still held it"
+        );
+    }
+
+    #[test]
+    fn colliding_seq_retractions_converge_regardless_of_arrival_order() {
+        // Both orders must produce byte-identical state. Under `seq` keying the
+        // direct-apply path used `insert` (last wins) while the merge path used
+        // `or_insert` (first wins), so the two paths disagreed with each other
+        // as well as with themselves.
+        let a = retract_op(&["id-a"], 5);
+        let b = retract_op(&["id-b"], 5);
+
+        let ab = apply(
+            &UserShard::default(),
+            vec![ShardDelta::Op(a.clone()), ShardDelta::Op(b.clone())],
+        );
+        let ba = apply(
+            &UserShard::default(),
+            vec![ShardDelta::Op(b), ShardDelta::Op(a)],
+        );
+
+        assert_eq!(
+            serde_json::to_vec(&ab).unwrap(),
+            serde_json::to_vec(&ba).unwrap(),
+            "arrival order changed the retained retraction set"
+        );
+    }
+
+    #[test]
+    fn a_non_retraction_op_cannot_be_filed_into_retract_ops_by_a_full_state_merge() {
+        // A peer sees the owner's OTHER signed ops on this very shard — a
+        // Profile, a Follow — and nothing about them says "not a retraction"
+        // except `op_type`. Filing one into `retract_ops` and shipping the
+        // whole state is free: it is genuinely owner-signed, so the signature
+        // check passes, and it is filed under its own content address, so the
+        // key check passes too.
+        //
+        // Accepting it would make `update_state` emit a state that this
+        // contract's own `validate_state` calls Invalid — the one disagreement
+        // a contract must never produce, because honest peers would then
+        // reject a state an honest peer just built.
+        let smuggled = profile_op(
+            &Profile {
+                display_name: "A".into(),
+                handle: "@a".into(),
+                bio: "".into(),
+                avatar: "".into(),
+            },
+            1,
+        );
+        assert_eq!(smuggled.op_type, OpType::Profile);
+        assert!(
+            smuggled
+                .verify(USER_SHARD_CONTEXT, &smuggled.signer_pubkey.clone())
+                .is_ok(),
+            "fixture must be genuinely owner-signed, or this proves nothing"
+        );
+
+        let mut malicious = UserShard::default();
+        malicious
+            .retract_ops
+            .insert(smuggled.content_id(USER_SHARD_CONTEXT), smuggled);
+
+        let res = UserShard::update_state(
+            params(),
+            state_of(&UserShard::default()),
+            vec![UpdateData::State(State::from(
+                serde_json::to_vec(&malicious).unwrap(),
+            ))],
+        )
+        .unwrap();
+        let merged = decode(res.unwrap_valid());
+
+        assert!(
+            merged.retract_ops.is_empty(),
+            "a non-retraction op was smuggled into retract_ops"
+        );
+        assert!(
+            validate(&merged),
+            "update_state produced a state its own validate_state rejects"
+        );
+    }
+
+    #[test]
+    fn an_oversized_retraction_payload_is_rejected() {
+        // `decode_id_list` caps what it INTERPRETS at MAX_IDS_PER_OP; it says
+        // nothing about how many BYTES get stored. Owner-writes bounds the
+        // blast radius to self-harm, but the bound belongs here too — the same
+        // helper guards the anyone-writes global index. Same class as
+        // GHSA-qxwp-8hqx-4wrj.
+        use freenet_microblogging_common::signed_op::{MAX_OP_PAYLOAD_LEN, encode_id_list};
+
+        let ids: Vec<String> = (0..40_000).map(|i| format!("id-{i:0>100}")).collect();
+        let o = op(OpType::RetractPost, encode_id_list(&ids), 5);
+
+        assert!(o.payload.len() > MAX_OP_PAYLOAD_LEN);
+        // Cryptographically valid and decodes to a non-empty list: only the
+        // explicit bound stops it.
+        assert!(
+            o.verify(USER_SHARD_CONTEXT, &o.signer_pubkey.clone())
+                .is_ok()
+        );
+        assert!(!decode_id_list(&o.payload).is_empty());
+
+        let shard = apply(&UserShard::default(), vec![ShardDelta::Op(o)]);
+        assert!(
+            shard.retract_ops.is_empty(),
+            "an unbounded payload was stored in replicated state"
+        );
     }
 
     #[test]
     fn validate_rejects_a_retraction_signed_by_another_key() {
         let mut shard = UserShard::default();
+        let op = foreign_retract_op(&["some-id"], 1);
         shard
             .retract_ops
-            .insert(1, foreign_retract_op(&["some-id"], 1));
+            .insert(op.content_id(USER_SHARD_CONTEXT), op);
         assert!(!validate(&shard));
     }
 
