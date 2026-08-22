@@ -157,6 +157,24 @@ fn post_hash(post: &Post) -> [u8; 32] {
     key
 }
 
+/// Whether a retraction op may be retained, for EVERY path that can store one.
+///
+/// One predicate on purpose. The three entry points — `apply_op`,
+/// `merge_state`, and `validate_state` — previously each spelled the check out
+/// by hand, and they drifted: only `apply_op` rejected an op whose id list
+/// decodes to empty, so the same owner-signed vacuous op was dropped when it
+/// arrived as a delta and stored when it arrived inside a full state. That is
+/// the same order-dependent divergence the content-address key exists to
+/// prevent, reintroduced one level up. The global index already routes every
+/// path through a single gate; this matches it.
+fn retract_op_is_acceptable(op: &SignedOp, owner_vk_hex: &str) -> bool {
+    op.op_type == OpType::RetractPost
+        && op.within_bounds()
+        && id_list_count_within_bounds(&op.payload)
+        && !decode_id_list(&op.payload).is_empty()
+        && op.verify(USER_SHARD_CONTEXT, owner_vk_hex).is_ok()
+}
+
 /// A post is acceptable iff within the length bound, self-verifying, and authored
 /// by this shard's owner (owner-writes — ADR-0001).
 fn post_is_acceptable(post: &Post, owner_vk_hex: &str) -> bool {
@@ -289,10 +307,10 @@ fn apply_op(shard: &mut UserShard, op: &SignedOp, owner: &str) -> bool {
             // Union by op seq; an identical op dedupes. A peer cannot fabricate
             // one (it would not verify against the owner), so this is a grow-set
             // of genuine owner-signed retractions.
-            if !op.within_bounds()
-                || !id_list_count_within_bounds(&op.payload)
-                || decode_id_list(&op.payload).is_empty()
-            {
+            // `op` is already verified against the owner by the caller, but
+            // go through the shared predicate anyway so this path cannot drift
+            // from the other two.
+            if !retract_op_is_acceptable(op, &op.signer_pubkey.clone()) {
                 return false;
             }
             // `or_insert` on a content-address key, matching the merge path
@@ -359,11 +377,7 @@ fn merge_state(shard: &mut UserShard, other: UserShard, owner: &str) {
     // reason: a peer could otherwise file a valid op under a key that is not
     // its content address, and `validate_state` would reject that too.
     for (_, op) in other.retract_ops {
-        if op.op_type == OpType::RetractPost
-            && op.within_bounds()
-            && id_list_count_within_bounds(&op.payload)
-            && op.verify(USER_SHARD_CONTEXT, owner).is_ok()
-        {
+        if retract_op_is_acceptable(&op, owner) {
             let key = op.content_id(USER_SHARD_CONTEXT);
             shard.retract_ops.entry(key).or_insert(op);
         }
@@ -563,12 +577,7 @@ impl ContractInterface for UserShard {
         // one and displace it. This is the check that makes a retraction
         // only ever as strong as the owner's key.
         for (key, op) in &shard.retract_ops {
-            if op.op_type != OpType::RetractPost
-                || !op.within_bounds()
-                || !id_list_count_within_bounds(&op.payload)
-                || *key != op.content_id(USER_SHARD_CONTEXT)
-                || op.verify(USER_SHARD_CONTEXT, &owner).is_err()
-            {
+            if !retract_op_is_acceptable(op, &owner) || *key != op.content_id(USER_SHARD_CONTEXT) {
                 return Ok(ValidateResult::Invalid);
             }
         }
@@ -1884,6 +1893,53 @@ mod integration {
             validate(&merged),
             "update_state produced a state its own validate_state rejects"
         );
+    }
+
+    #[test]
+    fn a_vacuous_retraction_is_refused_on_every_path_alike() {
+        // An owner-signed RetractPost naming NO ids. `apply_op` always rejected
+        // it; `merge_state` and `validate_state` did not, so the same op was
+        // dropped when it arrived as a delta and stored when it arrived inside
+        // a full state. Two replicas that received it by different routes then
+        // hold different `retract_ops` — the same order-dependent divergence
+        // the content-address key exists to prevent, one level up.
+        let vacuous = op(OpType::RetractPost, Vec::new(), 5);
+        assert!(
+            vacuous
+                .verify(USER_SHARD_CONTEXT, &vacuous.signer_pubkey.clone())
+                .is_ok(),
+            "fixture must be genuinely owner-signed, or this proves nothing"
+        );
+        assert!(decode_id_list(&vacuous.payload).is_empty());
+
+        // Path 1: as a delta.
+        let via_delta = apply(&UserShard::default(), vec![ShardDelta::Op(vacuous.clone())]);
+        assert!(via_delta.retract_ops.is_empty(), "delta path stored it");
+
+        // Path 2: inside a full state, which is where it used to get through.
+        let mut smuggled = UserShard::default();
+        smuggled
+            .retract_ops
+            .insert(vacuous.content_id(USER_SHARD_CONTEXT), vacuous);
+
+        let res = UserShard::update_state(
+            params(),
+            state_of(&UserShard::default()),
+            vec![UpdateData::State(State::from(
+                serde_json::to_vec(&smuggled).unwrap(),
+            ))],
+        )
+        .unwrap();
+        let via_state = decode(res.unwrap_valid());
+
+        assert!(via_state.retract_ops.is_empty(), "merge path stored it");
+        assert_eq!(
+            serde_json::to_vec(&via_delta).unwrap(),
+            serde_json::to_vec(&via_state).unwrap(),
+            "the two routes disagree about the same op"
+        );
+        // Path 3: and the state that DOES contain it must be refused outright.
+        assert!(!validate(&smuggled), "validate_state accepted a vacuous op");
     }
 
     #[test]

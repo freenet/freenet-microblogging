@@ -69,6 +69,7 @@
 use freenet_microblogging_common::inbox::{Notification, WriterCert};
 use freenet_microblogging_common::signed_op::{
     INBOX_SHARD_CONTEXT, OpType, SignedOp, decode_id_list, encode_id_list,
+    id_list_count_within_bounds,
 };
 use freenet_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -245,6 +246,9 @@ fn merge_prune_op(shard: &mut InboxShard, op: SignedOp) {
             }
         }
         OpType::PruneIds => {
+            if !prune_op_is_acceptable(&op) {
+                return;
+            }
             // Union by op seq; identical ops dedupe. A peer cannot fabricate a new
             // op (it would not verify), so this is a grow-set of genuine ops.
             shard.prune_ids_ops.entry(op.seq).or_insert(op);
@@ -395,10 +399,33 @@ fn merge_prune_ops(shard: &mut InboxShard, ops: Vec<SignedOp>, owner: &str) {
         return;
     }
     for op in ops {
-        if op.verify(INBOX_SHARD_CONTEXT, owner).is_ok() {
+        if prune_op_is_acceptable(&op) && op.verify(INBOX_SHARD_CONTEXT, owner).is_ok() {
             merge_prune_op(shard, op);
         }
     }
+}
+
+/// Whether a prune op is within its size bounds.
+///
+/// `PruneIds` shares `encode_id_list` with the user shard's and global index's
+/// `RetractPost`, and inherits the same two independent ceilings: `payload`
+/// bytes, and the number of ids named. `decode_id_list` bounds neither — it is
+/// tolerant, stopping at `MAX_IDS_PER_OP` and returning what it parsed, so an
+/// over-long list is silently TRUNCATED into a legal-looking op rather than
+/// refused.
+///
+/// Owner-writes bounds the blast radius to a malicious owner bloating their own
+/// inbox, which is the same reason the profile register is bounded — so the
+/// bound belongs here too, by the same argument.
+///
+/// Deliberately enforced at ACCEPTANCE only, NOT in `validate_state`. Unlike
+/// retraction, prune ops already exist in deployed inbox state; adding a
+/// ceiling to `validate_state` could declare an already-stored op invalid and
+/// strand a live inbox. Rejecting new oversized ops while continuing to accept
+/// existing states is the safe direction: `update_state` never produces a state
+/// `validate_state` would refuse.
+fn prune_op_is_acceptable(op: &SignedOp) -> bool {
+    op.within_bounds() && id_list_count_within_bounds(&op.payload)
 }
 
 /// Apply an `InboxStateDelta` (the sync delta from `get_state_delta`). It carries
@@ -774,6 +801,52 @@ mod test {
         let out = run_update(base, vec![delta_item(&InboxDelta::Prune(op))]);
         assert!(out.notifs.is_empty(), "pruned notif removed");
         assert!(tombstone_ids(&out).contains(&id), "tombstone recorded");
+    }
+
+    #[test]
+    fn an_oversized_prune_payload_is_rejected() {
+        // `PruneIds` shares `encode_id_list` with RetractPost and inherits the
+        // same two ceilings. `decode_id_list` bounds neither — it truncates.
+        use freenet_microblogging_common::signed_op::MAX_OP_PAYLOAD_LEN;
+
+        let ids: Vec<String> = (0..40_000).map(|i| format!("id-{i:0>100}")).collect();
+        let op = prune_op(OpType::PruneIds, encode_prune_ids(&ids), 1);
+        assert!(op.payload.len() > MAX_OP_PAYLOAD_LEN);
+        // Cryptographically valid — only the explicit bound refuses it.
+        assert!(op.verify(INBOX_SHARD_CONTEXT, &owner_vk()).is_ok());
+
+        let out = run_update(
+            InboxShard::default(),
+            vec![delta_item(&InboxDelta::Prune(op))],
+        );
+        assert!(
+            out.prune_ids_ops.is_empty(),
+            "an unbounded prune payload was stored"
+        );
+    }
+
+    #[test]
+    fn an_overlong_prune_id_list_is_refused_not_truncated() {
+        use freenet_microblogging_common::signed_op::MAX_IDS_PER_OP;
+
+        let ids: Vec<String> = (0..MAX_IDS_PER_OP + 1).map(|i| format!("id-{i}")).collect();
+        let op = prune_op(OpType::PruneIds, encode_prune_ids(&ids), 1);
+        // Legal under the BYTE bound, so only the count bound can refuse it.
+        assert!(op.within_bounds(), "fixture must be under the byte ceiling");
+        assert_eq!(
+            decode_prune_ids(&op.payload).len(),
+            MAX_IDS_PER_OP,
+            "decode must be silently truncating, or this proves nothing"
+        );
+
+        let out = run_update(
+            InboxShard::default(),
+            vec![delta_item(&InboxDelta::Prune(op))],
+        );
+        assert!(
+            out.prune_ids_ops.is_empty(),
+            "a truncated prefix of the signed list was stored"
+        );
     }
 
     #[test]
