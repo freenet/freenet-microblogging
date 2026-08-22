@@ -121,11 +121,15 @@ fn root_post_id(parameters: &Parameters<'_>) -> String {
 }
 
 /// The writer-credential seam (ADR-0001 abuse model). Today it accepts every
-/// writer — `WriterCert` is a reserved wire slot, not yet a policy. When a real
-/// credential (GhostKey) lands, gate writes here; the cert already rides on each
-/// record so doing so is an additive change, not a format break.
-fn verify_writer_cert(_cert: Option<&WriterCert>) -> bool {
-    true
+/// writer — `WriterCert` is a reserved wire slot, not yet a policy — but does
+/// bound the cert's size: `cert` is excluded from every record's signing
+/// payload (see `common::thread`), so it is unauthenticated as well as
+/// unbounded, and an unbounded field on an anyone-writes surface is a storage
+/// amplification primitive regardless of whether its *content* is checked.
+/// When a real credential (GhostKey) lands, gate writes here; the cert already
+/// rides on each record so doing so is an additive change, not a format break.
+fn verify_writer_cert(cert: Option<&WriterCert>) -> bool {
+    cert.is_none_or(WriterCert::within_bounds)
 }
 
 /// Whether a reply is acceptable on this thread: within the length bound, bound
@@ -151,7 +155,10 @@ fn like_is_acceptable(like: &LikeRecord, root: &str) -> bool {
 /// Whether a quote ref is acceptable: thread-bound self-verifying signature and
 /// an acceptable writer credential.
 fn quote_is_acceptable(quote: &QuoteRef, root: &str) -> bool {
-    !root.is_empty() && quote.verify(root).is_ok() && verify_writer_cert(quote.writer_cert.as_ref())
+    !root.is_empty()
+        && quote.within_bounds()
+        && quote.verify(root).is_ok()
+        && verify_writer_cert(quote.writer_cert.as_ref())
 }
 
 /// Whether a repost record is acceptable: thread-bound self-verifying signature
@@ -746,6 +753,75 @@ mod test {
         );
         assert_eq!(out.replies.len(), 1);
         assert!(out.replies.contains_key(&good.id));
+    }
+
+    #[test]
+    fn oversized_author_handle_rejected() {
+        // author_name/author_handle are author-chosen and self-verifying, so a
+        // signature alone does not bound them — only `within_bounds()` does.
+        let sk = MlDsa65::from_seed(&[1u8; 32].into());
+        let mut p = Post {
+            id: String::new(),
+            author_pubkey: hex::encode(sk.verifying_key().encode()),
+            author_name: "Bob".into(),
+            author_handle: "x"
+                .repeat(freenet_microblogging_common::post::MAX_AUTHOR_HANDLE_LEN + 1),
+            content: "hi".into(),
+            timestamp: 100,
+            reply_to: ROOT.into(),
+            quoted_post: String::new(),
+            signature: None,
+        };
+        p.id = p.compute_id();
+        let sig: Signature<MlDsa65> = sk.sign(&p.signing_payload());
+        p.signature = Some(hex::encode(sig.encode()));
+        assert_eq!(p.verify(), Ok(()));
+
+        let out = run_update(
+            ThreadShard::default(),
+            vec![delta_item(&ThreadDelta::Replies(vec![p]))],
+        );
+        assert!(out.replies.is_empty());
+    }
+
+    #[test]
+    fn oversized_writer_cert_rejected() {
+        // writer_cert is excluded from the signing payload (it is not yet a
+        // verified credential), so it can be attached AFTER signing without
+        // invalidating the signature — no keypair of one's own is needed, only
+        // a valid record to relay with a new cert bolted on. Only
+        // `verify_writer_cert`'s size bound stops this from being an unbounded
+        // write primitive on an anyone-writes surface.
+        let mut like = signed_like([1u8; 32], 1, true);
+        assert_eq!(like.verify(ROOT), Ok(()));
+        like.writer_cert = Some(WriterCert {
+            cert: vec![0u8; freenet_microblogging_common::thread::MAX_WRITER_CERT_LEN + 1],
+        });
+        // Tampering writer_cert after signing must NOT break the signature —
+        // that is the whole point of this being exploitable without a keypair.
+        assert_eq!(like.verify(ROOT), Ok(()));
+
+        let out = run_update(
+            ThreadShard::default(),
+            vec![delta_item(&ThreadDelta::Likes(vec![like]))],
+        );
+        assert!(out.likes.is_empty());
+    }
+
+    #[test]
+    fn oversized_quote_post_id_rejected() {
+        // quote_post_id IS signer-chosen and signed, so a signature alone
+        // does not bound it — same class as Post::reply_to/quoted_post, and
+        // it is also the map key the shard stores quotes under.
+        let big_id = "x".repeat(freenet_microblogging_common::post::MAX_POST_REF_LEN + 1);
+        let quote = signed_quote([1u8; 32], &big_id);
+        assert_eq!(quote.verify(ROOT), Ok(()));
+
+        let out = run_update(
+            ThreadShard::default(),
+            vec![delta_item(&ThreadDelta::Quotes(vec![quote]))],
+        );
+        assert!(out.quotes.is_empty());
     }
 
     #[test]

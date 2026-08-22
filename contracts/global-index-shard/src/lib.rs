@@ -595,6 +595,44 @@ mod test {
     }
 
     #[test]
+    fn oversized_author_name_rejected() {
+        // author_name/author_handle are author-chosen and self-verifying, so a
+        // signature alone does not bound them — only `within_bounds()` does.
+        // The global index is the most widely replicated state in the system,
+        // so an unbounded write here is an unbounded write primitive.
+        let mut p = signed_post([1u8; 32], "hi", 100);
+        p.author_name = "x".repeat(freenet_microblogging_common::post::MAX_AUTHOR_NAME_LEN + 1);
+        p.id = p.compute_id();
+        let sk = MlDsa65::from_seed(&[1u8; 32].into());
+        let sig: Signature<MlDsa65> = sk.sign(&p.signing_payload());
+        p.signature = Some(hex::encode(sig.encode()));
+        assert_eq!(p.verify(), Ok(()));
+        let out = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Posts(vec![p]))],
+        );
+        assert!(out.posts.is_empty());
+    }
+
+    #[test]
+    fn oversized_quoted_post_ref_rejected() {
+        // reply_to/quoted_post are just as author-chosen as author_name — a
+        // signature alone does not bound them either.
+        let mut p = signed_post([1u8; 32], "hi", 100);
+        p.quoted_post = "x".repeat(freenet_microblogging_common::post::MAX_POST_REF_LEN + 1);
+        p.id = p.compute_id();
+        let sk = MlDsa65::from_seed(&[1u8; 32].into());
+        let sig: Signature<MlDsa65> = sk.sign(&p.signing_payload());
+        p.signature = Some(hex::encode(sig.encode()));
+        assert_eq!(p.verify(), Ok(()));
+        let out = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Posts(vec![p]))],
+        );
+        assert!(out.posts.is_empty());
+    }
+
+    #[test]
     fn empty_params_singleton_accepts_posts() {
         // INVERSE of the thread shard's `empty_root_param_accepts_nothing`: the
         // global index is a singleton with empty parameters BY DESIGN, and it

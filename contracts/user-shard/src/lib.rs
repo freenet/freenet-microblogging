@@ -788,6 +788,25 @@ mod test {
     }
 
     #[test]
+    fn oversized_author_name_rejected_even_from_owner() {
+        // author_name/author_handle are author-chosen and self-verifying, so a
+        // signature alone does not bound them — only `within_bounds()` does.
+        // Owner-writes doesn't help: the owner can still sign an oversized name.
+        let owner = [1u8; 32];
+        let mut p = signed_post(owner, "hi", 1);
+        p.author_name = "x".repeat(freenet_microblogging_common::post::MAX_AUTHOR_NAME_LEN + 1);
+        p.id = p.compute_id();
+        let sk = MlDsa65::from_seed(&owner.into());
+        let sig: ml_dsa::Signature<MlDsa65> = sk.sign(&p.signing_payload());
+        p.signature = Some(hex::encode(sig.encode()));
+        assert_eq!(p.verify(), Ok(()));
+
+        let bytes = apply(owner, empty_state(), vec![ShardDelta::Posts(vec![p])]);
+        let shard: UserShard = serde_json::from_slice(&bytes).unwrap();
+        assert!(shard.posts.is_empty());
+    }
+
+    #[test]
     fn profile_lww_by_seq() {
         let owner = [1u8; 32];
         let mut p1 = sample_profile();

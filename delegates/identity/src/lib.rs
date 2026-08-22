@@ -1185,15 +1185,25 @@ fn import_identity(
 
 #[cfg(test)]
 mod test {
-    //! Why these tests live here and not against `process()`:
+    //! Why most of these tests exercise pure helpers rather than `process()`:
     //!
-    //! `process()` — and therefore the public `sign_post` / `sign_like` /
-    //! `export_identity` / `import_identity` entry points — reads and writes the
-    //! signer's seed through `DelegateCtx::{get_secret, set_secret}`. Those are
-    //! WASM host imports; on the host test target the stdlib stubs them to return
-    //! `None` / `false` (see `freenet_stdlib::delegate_host`). So a host-driven
-    //! `process()` call can never load a key and always returns the "no identity
-    //! found" error — it is genuinely undrivable off-WASM.
+    //! `process()` itself IS callable off-WASM — `#[delegate]` only generates a
+    //! separate `extern "C" fn process` wrapper gated behind `cfg(feature =
+    //! "freenet-main-delegate")`; `<IdentityDelegate as DelegateInterface>::process`
+    //! remains a plain associated function, and `DelegateCtx` derives `Default`.
+    //! The "process() dispatch wiring" tests below call it directly to prove
+    //! `resolve_origin(&origin)?` is actually threaded through the match arms —
+    //! a property no purely-unit-level test of `resolve_origin`/`origin_key`
+    //! alone can catch.
+    //!
+    //! What genuinely CANNOT be driven off-WASM is the secret *storage*
+    //! round-trip: `sign_post` / `sign_like` / `export_identity` /
+    //! `import_identity` read and write the signer's seed through
+    //! `DelegateCtx::{get_secret, set_secret}`, which are WASM host imports
+    //! stubbed off-WASM to always return `None` / `false` (see
+    //! `freenet_stdlib::delegate_host`). So a host-driven call into one of those
+    //! handlers can never load a key and always returns the "no identity found"
+    //! error.
     //!
     //! What matters for on-network correctness is that the bytes the delegate
     //! signs are the *same* bytes the contracts verify. That logic — payload
@@ -1511,6 +1521,224 @@ mod test {
 
         assert_eq!(a1, a2, "same seed must yield the same VK");
         assert_ne!(a1, b, "distinct seeds must yield distinct VKs");
+    }
+
+    // -- caller scoping --
+    //
+    // The delegate is reachable by any web app on the node, so every stored
+    // secret is namespaced by the attested caller. These tests pin the
+    // properties that isolation rests on: distinct callers never collide, the
+    // same caller is stable across requests, and only an attested web app may
+    // drive the delegate at all.
+
+    fn origin_of(bytes: [u8; 32]) -> Origin {
+        Origin(bytes.to_vec())
+    }
+
+    #[test]
+    fn different_callers_get_different_secret_keys() {
+        let a = origin_of([1u8; 32]);
+        let b = origin_of([2u8; 32]);
+        assert_ne!(
+            origin_key(&a, SECRET_SEED),
+            origin_key(&b, SECRET_SEED),
+            "two apps would share a seed slot"
+        );
+    }
+
+    #[test]
+    fn the_same_caller_is_stable_across_calls() {
+        // If this were not stable an app would lose its own identity between
+        // requests, which is the failure mode that tempts people to widen the
+        // scoping until it does nothing.
+        let a = origin_of([7u8; 32]);
+        assert_eq!(origin_key(&a, SECRET_SEED), origin_key(&a, SECRET_SEED));
+    }
+
+    #[test]
+    fn each_secret_is_distinct_within_one_caller() {
+        let a = origin_of([7u8; 32]);
+        let seed = origin_key(&a, SECRET_SEED);
+        let handle = origin_key(&a, SECRET_HANDLE);
+        let name = origin_key(&a, SECRET_DISPLAY_NAME);
+        assert_ne!(seed, handle);
+        assert_ne!(handle, name);
+        assert_ne!(seed, name);
+    }
+
+    #[test]
+    fn a_namespaced_key_cannot_be_confused_with_another() {
+        // The separator must not be producible from the id encoding, or one
+        // caller could craft a key that resolves into another's namespace.
+        let a = origin_of([0xABu8; 32]);
+        let key = String::from_utf8(origin_key(&a, SECRET_SEED)).unwrap();
+        assert!(key.starts_with(&a.to_hex()));
+        assert_eq!(key.matches(ORIGIN_KEY_SEPARATOR).count(), 1);
+        // hex ids contain no separator, so the split point is unambiguous
+        assert!(!a.to_hex().contains(ORIGIN_KEY_SEPARATOR));
+    }
+
+    #[test]
+    fn every_secret_access_goes_through_origin_key() {
+        // `get_secret`/`set_secret` are host-stubbed to always return
+        // `None`/`false` off-WASM (see the module doc above), so no test that
+        // drives `process()` or a handler can observe whether a namespacing
+        // regression (a handler reverted to a bare SECRET_SEED/SECRET_HANDLE/
+        // SECRET_DISPLAY_NAME constant) actually happened — the response
+        // still assembles and every existing test still passes. This
+        // source-scrape is the only thing that can catch it: every
+        // `ctx.get_secret(`/`ctx.set_secret(` call site, wherever it falls
+        // relative to line breaks, must have `origin_key(` within the next
+        // few tokens.
+        let source = include_str!("lib.rs");
+        let impl_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("this file has a #[cfg(test)] module");
+        let bytes = impl_source.as_bytes();
+
+        // Span of THIS call's own argument list, matching parens by depth —
+        // not a fixed-width window, which can bleed into the NEXT call site
+        // on a short line and spuriously "find" ITS `origin_key(` instead.
+        fn call_args_span(bytes: &[u8], open_paren: usize) -> &str {
+            let mut depth = 0i32;
+            let mut end = open_paren;
+            for (i, &b) in bytes.iter().enumerate().skip(open_paren) {
+                match b {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            std::str::from_utf8(&bytes[open_paren..=end]).unwrap()
+        }
+
+        for needle in ["get_secret(", "set_secret("] {
+            let mut search_from = 0;
+            while let Some(rel) = impl_source[search_from..].find(needle) {
+                let pos = search_from + rel;
+                let open_paren = pos + needle.len() - 1;
+                let args = call_args_span(bytes, open_paren);
+                assert!(
+                    args.contains("origin_key("),
+                    "found `{needle}` not routed through `origin_key(`: {args:?}"
+                );
+                search_from = pos + needle.len();
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_web_app_may_drive_the_delegate() {
+        use freenet_stdlib::prelude::ContractInstanceId;
+        let app = ContractInstanceId::new([5u8; 32]);
+        assert!(resolve_origin(&Some(MessageOrigin::WebApp(app))).is_ok());
+        // No origin at all: nothing to scope to, so nothing may be done.
+        assert!(resolve_origin(&None).is_err());
+    }
+
+    #[test]
+    fn an_inter_delegate_call_is_refused() {
+        // A delegate caller identifies the delegate, not a person — there is no
+        // identity it would be acting for, so acting at all is wrong.
+        let caller = DelegateKey::from_params("x", &Parameters::from(vec![]))
+            .expect("build a delegate key for the test");
+        assert!(resolve_origin(&Some(MessageOrigin::Delegate(caller))).is_err());
+    }
+
+    // -- process() dispatch wiring --
+    //
+    // The tests above cover `resolve_origin`/`origin_key` as PURE functions.
+    // They do not prove `process()` actually calls `resolve_origin(&origin)?`
+    // and threads the result into its handlers — a future edit that weakened
+    // that `?` (e.g. to `.unwrap_or(Origin(vec![]))`) would leave every test
+    // above green. `<IdentityDelegate as DelegateInterface>::process` is a
+    // plain associated function; `#[delegate]` only adds a separate
+    // `extern "C" fn process` wrapper behind `cfg(feature =
+    // "freenet-main-delegate")` (see freenet-macros' `delegate_impl.rs`), so
+    // the real `process()` is directly callable here, off-WASM, with no macro
+    // involved. `DelegateCtx` derives `Default` (its host-side `get_secret`/
+    // `set_secret` are stubbed to always return `None`/`false` off-WASM — see
+    // the module doc above), so only the dispatch path is exercised, not the
+    // storage round-trip.
+
+    #[test]
+    fn process_refuses_missing_origin() {
+        let mut ctx = DelegateCtx::default();
+        let msg = InboundDelegateMsg::ApplicationMessage(ApplicationMessage::new(
+            serde_json::to_vec(&Request::GetIdentity).unwrap(),
+        ));
+        let result = <IdentityDelegate as DelegateInterface>::process(
+            &mut ctx,
+            Parameters::from(vec![]),
+            None,
+            msg,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn process_refuses_delegate_origin() {
+        let mut ctx = DelegateCtx::default();
+        let msg = InboundDelegateMsg::ApplicationMessage(ApplicationMessage::new(
+            serde_json::to_vec(&Request::GetIdentity).unwrap(),
+        ));
+        let caller = DelegateKey::from_params("x", &Parameters::from(vec![]))
+            .expect("build a delegate key for the test");
+        let result = <IdentityDelegate as DelegateInterface>::process(
+            &mut ctx,
+            Parameters::from(vec![]),
+            Some(MessageOrigin::Delegate(caller)),
+            msg,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn process_threads_webapp_origin_into_create_identity() {
+        use freenet_stdlib::prelude::ContractInstanceId;
+
+        let mut ctx = DelegateCtx::default();
+        let request = Request::CreateIdentity {
+            handle: "alice".to_string(),
+            display_name: "Alice".to_string(),
+        };
+        let msg = InboundDelegateMsg::ApplicationMessage(ApplicationMessage::new(
+            serde_json::to_vec(&request).unwrap(),
+        ));
+        let app = ContractInstanceId::new([9u8; 32]);
+
+        let mut outbound = <IdentityDelegate as DelegateInterface>::process(
+            &mut ctx,
+            Parameters::from(vec![]),
+            Some(MessageOrigin::WebApp(app)),
+            msg,
+        )
+        .expect("a WebApp-origin CreateIdentity request must be accepted");
+
+        let OutboundDelegateMsg::ApplicationMessage(out) = outbound.remove(0) else {
+            panic!("expected an ApplicationMessage response");
+        };
+        let response: Response = serde_json::from_slice(&out.payload).unwrap();
+        match response {
+            Response::Identity {
+                handle,
+                display_name,
+                public_key,
+            } => {
+                assert_eq!(handle, "alice");
+                assert_eq!(display_name, "Alice");
+                // ML-DSA-65 VK is 1952 bytes -> 3904 hex chars.
+                assert_eq!(public_key.len(), 1952 * 2);
+            }
+            _ => panic!("expected Response::Identity"),
+        }
     }
 
     // Cross-check: a post and a like signed by the SAME key are domain-separated,
@@ -1870,77 +2098,5 @@ mod test {
             USER_SHARD_CONTEXT,
         );
         assert_eq!(decode_id_list(&op.payload), ids);
-    }
-
-    // -- caller scoping --
-    //
-    // The delegate is reachable by any web app on the node, so every stored
-    // secret is namespaced by the attested caller. These tests pin the two
-    // properties that makes rest on: distinct callers never collide, and the
-    // same caller is stable across requests.
-
-    fn origin_of(bytes: [u8; 32]) -> Origin {
-        Origin(bytes.to_vec())
-    }
-
-    #[test]
-    fn different_callers_get_different_secret_keys() {
-        let a = origin_of([1u8; 32]);
-        let b = origin_of([2u8; 32]);
-        assert_ne!(
-            origin_key(&a, SECRET_SEED),
-            origin_key(&b, SECRET_SEED),
-            "two apps would share a seed slot"
-        );
-    }
-
-    #[test]
-    fn the_same_caller_is_stable_across_calls() {
-        // If this were not stable an app would lose its own identity between
-        // requests, which is the failure mode that tempts people to widen the
-        // scoping until it does nothing.
-        let a = origin_of([7u8; 32]);
-        assert_eq!(origin_key(&a, SECRET_SEED), origin_key(&a, SECRET_SEED));
-    }
-
-    #[test]
-    fn each_secret_is_distinct_within_one_caller() {
-        let a = origin_of([7u8; 32]);
-        let seed = origin_key(&a, SECRET_SEED);
-        let handle = origin_key(&a, SECRET_HANDLE);
-        let name = origin_key(&a, SECRET_DISPLAY_NAME);
-        assert_ne!(seed, handle);
-        assert_ne!(handle, name);
-        assert_ne!(seed, name);
-    }
-
-    #[test]
-    fn a_namespaced_key_cannot_be_confused_with_another() {
-        // The separator must not be producible from the id encoding, or one
-        // caller could craft a key that resolves into another's namespace.
-        let a = origin_of([0xABu8; 32]);
-        let key = String::from_utf8(origin_key(&a, SECRET_SEED)).unwrap();
-        assert!(key.starts_with(&a.to_hex()));
-        assert_eq!(key.matches(ORIGIN_KEY_SEPARATOR).count(), 1);
-        // hex ids contain no separator, so the split point is unambiguous
-        assert!(!a.to_hex().contains(ORIGIN_KEY_SEPARATOR));
-    }
-
-    #[test]
-    fn only_a_web_app_may_drive_the_delegate() {
-        use freenet_stdlib::prelude::ContractInstanceId;
-        let app = ContractInstanceId::new([5u8; 32]);
-        assert!(resolve_origin(&Some(MessageOrigin::WebApp(app))).is_ok());
-        // No origin at all: nothing to scope to, so nothing may be done.
-        assert!(resolve_origin(&None).is_err());
-    }
-
-    #[test]
-    fn an_inter_delegate_call_is_refused() {
-        // A delegate caller identifies the delegate, not a person — there is no
-        // identity it would be acting for, so acting at all is wrong.
-        let caller = DelegateKey::from_params("x", &Parameters::from(vec![]))
-            .expect("build a delegate key for the test");
-        assert!(resolve_origin(&Some(MessageOrigin::Delegate(caller))).is_err());
     }
 }

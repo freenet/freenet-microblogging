@@ -99,22 +99,32 @@ pub const MAX_AUTHOR_NAME_LEN: usize = 64;
 /// [`MAX_HANDLE_LEN`](crate::signed_op::MAX_HANDLE_LEN).
 pub const MAX_AUTHOR_HANDLE_LEN: usize = 32;
 
+/// Maximum length of `reply_to` / `quoted_post`, in UTF-8 bytes. Both are
+/// meant to hold a content-addressed post id (hex of a 32-byte blake3 hash =
+/// 64 chars); this is double that as a margin, not a format requirement — the
+/// point is a ceiling, not validation of the id shape.
+pub const MAX_POST_REF_LEN: usize = 128;
+
 impl Post {
     /// Whether every author-controlled field is within its bound.
     ///
     /// A signature proves who wrote a record, not that the record is benign —
-    /// the author picks `author_name` / `author_handle` freely and signs
-    /// whatever they picked. Unbounded, those two fields have no ceiling at
-    /// all: a valid post could carry megabytes of "name" into every replica of
-    /// a shard whose only other bound is 280 bytes of content.
+    /// the author picks every field on this struct freely and signs whatever
+    /// they picked. Unbounded, these fields have no ceiling at all: a valid
+    /// post could carry an arbitrary amount of data into every replica of a
+    /// shard whose only other bound is `MAX_CONTENT_LEN`. `reply_to` and
+    /// `quoted_post` are just as author-chosen as `author_name`/
+    /// `author_handle` — nothing about being a "reference" field exempts them.
     ///
-    /// Kept separate from `verify()` so the split stays legible: `verify()`
-    /// answers "did this key sign these bytes", `within_bounds()` answers "may
-    /// these bytes be stored at all".
+    /// Kept separate from `verify()`: `verify()` answers "did this key sign
+    /// these bytes", `within_bounds()` answers "may these bytes be stored at
+    /// all".
     pub fn within_bounds(&self) -> bool {
         self.content.len() <= MAX_CONTENT_LEN
             && self.author_name.len() <= MAX_AUTHOR_NAME_LEN
             && self.author_handle.len() <= MAX_AUTHOR_HANDLE_LEN
+            && self.reply_to.len() <= MAX_POST_REF_LEN
+            && self.quoted_post.len() <= MAX_POST_REF_LEN
     }
 
     /// The exact bytes that are hashed for the ID and signed/verified.
@@ -554,6 +564,22 @@ mod test {
     fn within_bounds_still_rejects_oversized_content() {
         let mut p = sample();
         p.content = "x".repeat(MAX_CONTENT_LEN + 1);
+        assert!(!p.within_bounds());
+    }
+
+    #[test]
+    fn within_bounds_rejects_oversized_reply_to() {
+        // reply_to/quoted_post are just as author-chosen as author_name/handle
+        // — nothing about being a "reference" field exempts them from a bound.
+        let mut p = sample();
+        p.reply_to = "x".repeat(MAX_POST_REF_LEN + 1);
+        assert!(!p.within_bounds());
+    }
+
+    #[test]
+    fn within_bounds_rejects_oversized_quoted_post() {
+        let mut p = sample();
+        p.quoted_post = "x".repeat(MAX_POST_REF_LEN + 1);
         assert!(!p.within_bounds());
     }
 
