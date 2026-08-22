@@ -48,7 +48,7 @@
 
 use freenet_microblogging_common::post::Post;
 use freenet_microblogging_common::signed_op::{
-    GLOBAL_INDEX_CONTEXT, OpType, SignedOp, decode_id_list,
+    GLOBAL_INDEX_CONTEXT, OpType, SignedOp, decode_id_list, id_list_count_within_bounds,
 };
 use freenet_microblogging_common::thread::WriterCert;
 use freenet_stdlib::prelude::*;
@@ -227,6 +227,7 @@ fn retract_op_is_acceptable(op: &SignedOp) -> bool {
     // MAX_IDS_PER_OP, which says nothing about how many bytes get stored.
     if op.op_type != OpType::RetractPost
         || !op.within_bounds()
+        || !id_list_count_within_bounds(&op.payload)
         || decode_id_list(&op.payload).is_empty()
     {
         return false;
@@ -1204,6 +1205,187 @@ mod test {
         assert!(
             shard.retract_ops.is_empty(),
             "an unbounded payload was stored in replicated state"
+        );
+    }
+
+    // -- the merge laws, asserted directly --
+    //
+    // Freenet requires a contract's merge to be an idempotent commutative
+    // monoid: applying the same op twice equals applying it once, and ANY
+    // permutation of the same op set produces byte-identical state. A test that
+    // only checks "the tombstone is present" passes under a merge that violates
+    // both. These assert the laws themselves, over the retraction surface where
+    // the `seq`-keying defect lived. See freenet-core#5320, which exists
+    // because non-converging contract merges are a live production problem.
+
+    /// Every ordering of `ops`, applied to an empty shard, must serialize
+    /// identically. Returns the canonical bytes so callers can compare further.
+    fn all_permutations_agree(ops: &[SignedOp]) -> Vec<u8> {
+        fn permute(ops: &[SignedOp]) -> Vec<Vec<SignedOp>> {
+            if ops.len() <= 1 {
+                return vec![ops.to_vec()];
+            }
+            let mut out = Vec::new();
+            for i in 0..ops.len() {
+                let mut rest = ops.to_vec();
+                let head = rest.remove(i);
+                for mut tail in permute(&rest) {
+                    let mut one = vec![head.clone()];
+                    one.append(&mut tail);
+                    out.push(one);
+                }
+            }
+            out
+        }
+
+        let orders = permute(ops);
+        assert!(
+            orders.len() >= 6,
+            "need at least 3 ops for this to test anything about ordering"
+        );
+
+        let mut canonical: Option<Vec<u8>> = None;
+        for order in orders {
+            let shard = run_update(
+                GlobalIndexShard::default(),
+                order
+                    .iter()
+                    .map(|o| delta_item(&GlobalIndexDelta::Retract(o.clone())))
+                    .collect(),
+            );
+            let bytes = serde_json::to_vec(&shard).unwrap();
+            match &canonical {
+                None => canonical = Some(bytes),
+                Some(first) => assert_eq!(
+                    *first, bytes,
+                    "a permutation of the same op set produced different state"
+                ),
+            }
+        }
+        canonical.unwrap()
+    }
+
+    #[test]
+    fn retraction_merge_is_commutative_over_every_permutation() {
+        // Three signers, ALL sharing one seq — the collision case, at a size
+        // where "it happened to work for this order" is not an explanation.
+        let ops = vec![
+            retract_op_by([1u8; 32], &["id-a"], 7),
+            retract_op_by([2u8; 32], &["id-b"], 7),
+            retract_op_by([3u8; 32], &["id-c"], 7),
+        ];
+        let canonical = all_permutations_agree(&ops);
+
+        let shard: GlobalIndexShard = serde_json::from_slice(&canonical).unwrap();
+        assert_eq!(
+            shard.retract_ops.len(),
+            3,
+            "every distinct op must be retained, or the ops are not all being merged"
+        );
+    }
+
+    #[test]
+    fn retraction_merge_is_idempotent() {
+        // Applying an op twice must equal applying it once. With a content
+        // address this holds by construction; with any key derived from
+        // mutable or re-chosen data it would not.
+        let op = retract_op_by([1u8; 32], &["id-a"], 7);
+
+        let once = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Retract(op.clone()))],
+        );
+        let twice = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Retract(op.clone())),
+                delta_item(&GlobalIndexDelta::Retract(op.clone())),
+            ],
+        );
+        // Also re-apply onto the already-merged state, which is the shape a
+        // real re-gossip takes.
+        let c = serde_json::to_vec(&once).unwrap();
+        let again = run_update(once, vec![delta_item(&GlobalIndexDelta::Retract(op))]);
+        assert_eq!(c, serde_json::to_vec(&twice).unwrap(), "f(x,x) != f(x)");
+        assert_eq!(
+            c,
+            serde_json::to_vec(&again).unwrap(),
+            "re-gossip changed state"
+        );
+    }
+
+    #[test]
+    fn retraction_merge_is_associative() {
+        // (a·b)·c == a·(b·c). Distinct from commutativity: a merge can be
+        // order-insensitive pairwise and still depend on how the ops were
+        // GROUPED into deltas, which is exactly what differs between a batched
+        // sync delta and a stream of single-op deltas.
+        let a = retract_op_by([1u8; 32], &["id-a"], 7);
+        let b = retract_op_by([2u8; 32], &["id-b"], 7);
+        let c = retract_op_by([3u8; 32], &["id-c"], 7);
+
+        let ab = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Retract(a.clone())),
+                delta_item(&GlobalIndexDelta::Retract(b.clone())),
+            ],
+        );
+        let ab_c = run_update(ab, vec![delta_item(&GlobalIndexDelta::Retract(c.clone()))]);
+
+        let bc = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Retract(b)),
+                delta_item(&GlobalIndexDelta::Retract(c)),
+            ],
+        );
+        let a_bc = run_update(bc, vec![delta_item(&GlobalIndexDelta::Retract(a))]);
+
+        assert_eq!(
+            serde_json::to_vec(&ab_c).unwrap(),
+            serde_json::to_vec(&a_bc).unwrap(),
+            "grouping changed the result"
+        );
+    }
+
+    #[test]
+    fn an_overlong_id_list_is_refused_not_truncated() {
+        // `decode_id_list` stops at MAX_IDS_PER_OP and returns what it parsed,
+        // so a count check that leaned on it would see a legal-looking 1000-id
+        // list and accept a PREFIX of what the signer actually signed. Storing
+        // part of an op the author never authorized in that form is the wrong
+        // answer at an acceptance boundary — fail closed instead.
+        use freenet_microblogging_common::signed_op::{MAX_IDS_PER_OP, encode_id_list};
+
+        let sk = MlDsa65::from_seed(&[4u8; 32].into());
+        let ids: Vec<String> = (0..MAX_IDS_PER_OP + 1).map(|i| format!("id-{i}")).collect();
+        let mut o = SignedOp {
+            op_type: OpType::RetractPost,
+            payload: encode_id_list(&ids),
+            seq: 1,
+            signer_pubkey: hex::encode(sk.verifying_key().encode()),
+            signature: None,
+        };
+        let sig: ml_dsa::Signature<MlDsa65> = sk.sign(&o.signing_payload(GLOBAL_INDEX_CONTEXT));
+        o.signature = Some(hex::encode(sig.encode()));
+
+        // Under the BYTE bound this op is perfectly legal — so only the count
+        // bound can refuse it, which is why both halves have to exist.
+        assert!(o.within_bounds(), "fixture must be under the byte ceiling");
+        assert_eq!(
+            decode_id_list(&o.payload).len(),
+            MAX_IDS_PER_OP,
+            "decode must be silently truncating, or this proves nothing"
+        );
+
+        let shard = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Retract(o))],
+        );
+        assert!(
+            shard.retract_ops.is_empty(),
+            "a truncated prefix of the signed list was stored"
         );
     }
 }

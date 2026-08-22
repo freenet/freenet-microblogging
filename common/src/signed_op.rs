@@ -234,11 +234,45 @@ pub fn encode_id_list(ids: &[String]) -> Vec<u8> {
     buf
 }
 
+/// Whether an [`encode_id_list`] payload carries at most [`MAX_IDS_PER_OP`] ids.
+///
+/// [`decode_id_list`] is deliberately TOLERANT — it stops at
+/// [`MAX_IDS_PER_OP`] and returns what it parsed — so on its own it silently
+/// TRUNCATES an over-long list rather than refusing it. Truncation is the wrong
+/// answer at an acceptance boundary: the signer signed a list, and storing a
+/// prefix of it applies part of an op the author never authorized in that form.
+/// Acceptance therefore fails CLOSED on the count, using this, while
+/// `decode_id_list` keeps its tolerant contract for read paths.
+///
+/// This is the COUNT half of the bound; [`SignedOp::within_bounds`] is the BYTE
+/// half. Both are needed: a payload can be under the byte ceiling while naming
+/// far too many ids, and under the id ceiling while carrying junk bytes.
+pub fn id_list_count_within_bounds(payload: &[u8]) -> bool {
+    let mut count = 0usize;
+    let mut i = 0;
+    while i + 4 <= payload.len() {
+        let len = u32::from_le_bytes([payload[i], payload[i + 1], payload[i + 2], payload[i + 3]])
+            as usize;
+        i += 4;
+        if len > MAX_ID_LEN || i + len > payload.len() {
+            break;
+        }
+        count += 1;
+        if count > MAX_IDS_PER_OP {
+            return false;
+        }
+        i += len;
+    }
+    true
+}
+
 /// Decode an [`encode_id_list`] payload, capped at [`MAX_IDS_PER_OP`].
 ///
 /// Tolerant by design: malformed input yields the ids parsed so far rather than
 /// failing or panicking (AGENTS.md → "No unwrap/panic"). A truncated payload is
-/// a partial list, never a crash.
+/// a partial list, never a crash. Acceptance paths must ALSO call
+/// [`id_list_count_within_bounds`], or an over-long list is silently truncated
+/// into a valid-looking op.
 pub fn decode_id_list(payload: &[u8]) -> Vec<String> {
     let mut ids = Vec::new();
     let mut i = 0;

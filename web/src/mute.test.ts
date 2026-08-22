@@ -30,7 +30,7 @@ describe("mute list", () => {
   it("persists across a reload", () => {
     setMuted(KEY_A, true);
     // What was written is what a fresh load would read back.
-    expect(JSON.parse(store.get("fwitter.muted.v1")!)).toContain(KEY_A);
+    expect(JSON.parse(store.get("raven.muted.v1")!)).toContain(KEY_A);
   });
 
   it("filters only the muted author's posts", () => {

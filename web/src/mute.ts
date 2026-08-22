@@ -40,7 +40,7 @@
 
 import { writable } from "svelte/store";
 
-const STORAGE_KEY = "fwitter.muted.v1";
+const STORAGE_KEY = "raven.muted.v1";
 
 /** Hex ML-DSA-65 verifying keys whose content this reader has muted. */
 export const muted = writable<Set<string>>(load());

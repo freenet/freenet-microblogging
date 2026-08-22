@@ -45,7 +45,7 @@
 use freenet_microblogging_common::post::Post;
 use freenet_microblogging_common::signed_op::{
     MAX_FOLLOW_TARGETS_PER_OP, MAX_TARGET_KEY_LEN, OpType, Profile, SignedOp, USER_SHARD_CONTEXT,
-    decode_id_list,
+    decode_id_list, id_list_count_within_bounds,
 };
 use freenet_stdlib::prelude::{
     blake3::{Hasher as Blake3, traits::digest::Digest},
@@ -289,7 +289,10 @@ fn apply_op(shard: &mut UserShard, op: &SignedOp, owner: &str) -> bool {
             // Union by op seq; an identical op dedupes. A peer cannot fabricate
             // one (it would not verify against the owner), so this is a grow-set
             // of genuine owner-signed retractions.
-            if !op.within_bounds() || decode_id_list(&op.payload).is_empty() {
+            if !op.within_bounds()
+                || !id_list_count_within_bounds(&op.payload)
+                || decode_id_list(&op.payload).is_empty()
+            {
                 return false;
             }
             // `or_insert` on a content-address key, matching the merge path
@@ -358,6 +361,7 @@ fn merge_state(shard: &mut UserShard, other: UserShard, owner: &str) {
     for (_, op) in other.retract_ops {
         if op.op_type == OpType::RetractPost
             && op.within_bounds()
+            && id_list_count_within_bounds(&op.payload)
             && op.verify(USER_SHARD_CONTEXT, owner).is_ok()
         {
             let key = op.content_id(USER_SHARD_CONTEXT);
@@ -561,6 +565,7 @@ impl ContractInterface for UserShard {
         for (key, op) in &shard.retract_ops {
             if op.op_type != OpType::RetractPost
                 || !op.within_bounds()
+                || !id_list_count_within_bounds(&op.payload)
                 || *key != op.content_id(USER_SHARD_CONTEXT)
                 || op.verify(USER_SHARD_CONTEXT, &owner).is_err()
             {
@@ -1906,6 +1911,140 @@ mod integration {
         assert!(
             shard.retract_ops.is_empty(),
             "an unbounded payload was stored in replicated state"
+        );
+    }
+
+    // -- the merge laws, asserted directly --
+    //
+    // Same laws as the global index, on the owner-writes surface where the
+    // collision is same-signer. See freenet-core#5320.
+
+    #[test]
+    fn retraction_merge_is_commutative_over_every_permutation() {
+        // Three retractions of DIFFERENT posts all sharing one seq — what a
+        // clamped `Date.now()` produces when an owner withdraws three posts in
+        // one tick.
+        let ops = vec![
+            retract_op(&["id-a"], 5),
+            retract_op(&["id-b"], 5),
+            retract_op(&["id-c"], 5),
+        ];
+
+        fn permute(ops: &[SignedOp]) -> Vec<Vec<SignedOp>> {
+            if ops.len() <= 1 {
+                return vec![ops.to_vec()];
+            }
+            let mut out = Vec::new();
+            for i in 0..ops.len() {
+                let mut rest = ops.to_vec();
+                let head = rest.remove(i);
+                for mut tail in permute(&rest) {
+                    let mut one = vec![head.clone()];
+                    one.append(&mut tail);
+                    out.push(one);
+                }
+            }
+            out
+        }
+
+        let orders = permute(&ops);
+        assert_eq!(orders.len(), 6);
+
+        let mut canonical: Option<Vec<u8>> = None;
+        for order in orders {
+            let shard = apply(
+                &UserShard::default(),
+                order.into_iter().map(ShardDelta::Op).collect(),
+            );
+            assert_eq!(
+                shard.retract_ops.len(),
+                3,
+                "a same-seq retraction displaced another"
+            );
+            let bytes = serde_json::to_vec(&shard).unwrap();
+            match &canonical {
+                None => canonical = Some(bytes),
+                Some(first) => assert_eq!(
+                    *first, bytes,
+                    "a permutation of the same op set produced different state"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn retraction_merge_is_idempotent() {
+        let op = retract_op(&["id-a"], 5);
+
+        let once = apply(&UserShard::default(), vec![ShardDelta::Op(op.clone())]);
+        let twice = apply(
+            &UserShard::default(),
+            vec![ShardDelta::Op(op.clone()), ShardDelta::Op(op.clone())],
+        );
+        let c = serde_json::to_vec(&once).unwrap();
+        // Re-applying onto the already-merged state is the shape a re-gossip
+        // takes, and is the one the direct-apply path used to get wrong: it
+        // called `insert` rather than `or_insert`.
+        let again = apply(&once, vec![ShardDelta::Op(op)]);
+
+        assert_eq!(c, serde_json::to_vec(&twice).unwrap(), "f(x,x) != f(x)");
+        assert_eq!(
+            c,
+            serde_json::to_vec(&again).unwrap(),
+            "re-gossip changed state"
+        );
+    }
+
+    #[test]
+    fn retraction_merge_is_associative() {
+        // Distinct from commutativity: this varies how the ops are GROUPED
+        // into deltas, which is what differs between a batched sync delta and
+        // a stream of single-op deltas.
+        let a = retract_op(&["id-a"], 5);
+        let b = retract_op(&["id-b"], 5);
+        let c = retract_op(&["id-c"], 5);
+
+        let ab = apply(
+            &UserShard::default(),
+            vec![ShardDelta::Op(a.clone()), ShardDelta::Op(b.clone())],
+        );
+        let ab_c = apply(&ab, vec![ShardDelta::Op(c.clone())]);
+
+        let bc = apply(
+            &UserShard::default(),
+            vec![ShardDelta::Op(b), ShardDelta::Op(c)],
+        );
+        let a_bc = apply(&bc, vec![ShardDelta::Op(a)]);
+
+        assert_eq!(
+            serde_json::to_vec(&ab_c).unwrap(),
+            serde_json::to_vec(&a_bc).unwrap(),
+            "grouping changed the result"
+        );
+    }
+
+    #[test]
+    fn an_overlong_id_list_is_refused_not_truncated() {
+        // `decode_id_list` stops at MAX_IDS_PER_OP and returns what it parsed,
+        // so a count check leaning on it would see a legal-looking 1000-id list
+        // and store a PREFIX of what the owner actually signed.
+        use freenet_microblogging_common::signed_op::{MAX_IDS_PER_OP, encode_id_list};
+
+        let ids: Vec<String> = (0..MAX_IDS_PER_OP + 1).map(|i| format!("id-{i}")).collect();
+        let o = op(OpType::RetractPost, encode_id_list(&ids), 5);
+
+        // Legal under the BYTE bound, so only the count bound can refuse it.
+        assert!(o.within_bounds(), "fixture must be under the byte ceiling");
+        assert_eq!(
+            decode_id_list(&o.payload).len(),
+            MAX_IDS_PER_OP,
+            "decode must be silently truncating, or this proves nothing"
+        );
+
+        let shard = apply(&UserShard::default(), vec![ShardDelta::Op(o)]);
+        assert!(
+            shard.retract_ops.is_empty(),
+            "a truncated prefix of the signed list was stored"
         );
     }
 
