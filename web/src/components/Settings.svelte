@@ -2,6 +2,7 @@
   import { toggleTheme } from "../theme";
   import { exportIdentity } from "../identity";
   import { identity } from "../stores/freenet";
+  import { muted, setMuted } from "../mute";
 
   function truncateKey(key: string): string {
     if (key.length <= 26) return key;
@@ -182,6 +183,22 @@
   </div>
 
   <!-- Privacy -->
+  {@render sectionBlock("Muted accounts", "Hidden from your feeds. Local to this browser — nothing is deleted from the network, and nobody is told.")}
+  <div class="settings-list">
+    {#if $muted.size === 0}
+      <div class="settings-row">
+        {@render labelMain("Nobody muted", "Mute an author from any post to stop seeing them here.", false)}
+      </div>
+    {:else}
+      {#each [...$muted] as key (key)}
+        <div class="settings-row">
+          {@render labelMain(truncateKey(key), "Muted by verifying key, not by handle — handles are self-declared and can be copied.", false)}
+          <button class="settings-export" onclick={() => setMuted(key, false)}>Unmute</button>
+        </div>
+      {/each}
+    {/if}
+  </div>
+
   {@render sectionBlock("Privacy & data", "You own it. The network only caches it.")}
   <div class="settings-list">
     <div class="settings-row">

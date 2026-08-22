@@ -6,8 +6,6 @@
   interface Props {
     posts: Post[];
     discoverPosts: Post[];
-    /** Reserved for the future per-user-feed filter; not used yet. */
-    followedPubkeys: Set<string>;
     onCompose: () => void;
     onOpen?: (post: Post) => void;
     onLike?: (postId: string, liked: boolean) => void;
@@ -18,16 +16,12 @@
   let {
     posts,
     discoverPosts,
-    followedPubkeys,
     onCompose,
     onOpen,
     onLike,
     onRepost,
     onQuote,
   }: Props = $props();
-
-  // Followed pubkeys are reserved for the future per-user-feed filter; not used yet.
-  void followedPubkeys;
 
   let activeTab: "following" | "discover" = $state("following");
 

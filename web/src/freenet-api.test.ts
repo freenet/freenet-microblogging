@@ -108,6 +108,9 @@ vi.mock("./identity", () => ({
   signRepost: vi.fn(() => true),
   signQuoteRef: vi.fn(() => true),
   signReply: vi.fn(() => true),
+  signFollow: vi.fn(() => true),
+  signProfile: vi.fn(() => true),
+  signRetract: vi.fn(() => true),
 }));
 
 import {
@@ -135,6 +138,8 @@ function makeConnection() {
     onRepliesUpdated: ReturnType<typeof vi.fn>;
     onGlobalPostsLoaded: ReturnType<typeof vi.fn>;
     onNewGlobalPost: ReturnType<typeof vi.fn>;
+    onFollowsUpdated: ReturnType<typeof vi.fn>;
+    onFollowingPostsLoaded: ReturnType<typeof vi.fn>;
   } = {
     onPostsLoaded: vi.fn(),
     onNewPost: vi.fn(),
@@ -145,6 +150,8 @@ function makeConnection() {
     onRepliesUpdated: vi.fn(),
     onGlobalPostsLoaded: vi.fn(),
     onNewGlobalPost: vi.fn(),
+    onFollowsUpdated: vi.fn(),
+    onFollowingPostsLoaded: vi.fn(),
   };
   const conn = new FreenetConnection(callbacks as unknown as FreenetCallbacks);
   conn.connect();
@@ -629,6 +636,337 @@ describe("FreenetConnection", () => {
       const emitted = callbacks.onQuoteUpdated.mock.calls[0][0] as QuoteState;
       expect(emitted.postId).toBe(rootId);
       expect(emitted.count).toBe(2);
+    });
+  });
+
+  describe("follows — owner-signed ops + aggregated Following feed", () => {
+    const TARGET_VK = "cd".repeat(1952);
+
+    /** Bring a connection up with its user shard instantiated and settled. */
+    async function readyConn() {
+      const { conn, api, callbacks } = makeConnection();
+      conn.setUser(OWNER_VK, "Alice", "alice");
+      await drainGets(api);
+      return { conn, api, callbacks };
+    }
+
+    /** Feed a user-shard GET response carrying `follows` (and optional posts). */
+    function deliverOwnerState(
+      api: ReturnType<typeof makeConnection>["api"],
+      follows: Record<string, { seq: number; following: boolean }>,
+      posts: unknown[] = [],
+    ) {
+      // Every GET issued during startup targets the owner's own shard (probe
+      // then load), so the first one carries the right key.
+      const ownerGet = api.getCalls[0];
+      api.handler.onContractGet({
+        key: ownerGet.req.key,
+        state: Array.from(
+          new TextEncoder().encode(JSON.stringify({ posts, follows })),
+        ),
+      } as unknown as GetResponse);
+    }
+
+    it("followUser asks the delegate to sign, then folds an Op delta in", async () => {
+      const { conn, api } = await readyConn();
+      const signFollowMock = (await import("./identity"))
+        .signFollow as unknown as ReturnType<typeof vi.fn>;
+      signFollowMock.mockClear();
+
+      expect(await conn.followUser(TARGET_VK, true)).toBe(true);
+      // The delegate is asked to sign — the browser never builds the op itself.
+      expect(signFollowMock).toHaveBeenCalledTimes(1);
+      const [nonce, targets, follow] = signFollowMock.mock.calls[0];
+      expect(targets).toEqual([TARGET_VK]);
+      expect(follow).toBe(true);
+
+      const before = api.updateCalls.length;
+      await conn.completeShardOp({
+        nonce: nonce as string,
+        op_type: "Follow",
+        payload: "5b5d", // hex of `[]` — relayed verbatim, never re-encoded
+        seq: 42,
+        signer_pubkey: OWNER_VK,
+        signature: "sig",
+      });
+
+      expect(api.updateCalls.length).toBe(before + 1);
+      const sent = api.updateCalls[api.updateCalls.length - 1];
+      const body = JSON.parse(
+        new TextDecoder().decode(
+          Uint8Array.from(
+            (sent as { data: { updateData: { delta: number[] } } }).data
+              .updateData.delta,
+          ),
+        ),
+      ) as { Op?: { op_type: string; payload: number[]; seq: number } };
+      // Externally-tagged `ShardDelta::Op`, and the payload is a Rust Vec<u8>
+      // — a JSON array of byte values, not a string.
+      expect(body.Op?.op_type).toBe("Follow");
+      expect(body.Op?.payload).toEqual([0x5b, 0x5d]);
+      expect(body.Op?.seq).toBe(42);
+    });
+
+    it("refuses to follow self — it would double-count the owner's posts", async () => {
+      const { conn } = await readyConn();
+      expect(await conn.followUser(OWNER_VK, true)).toBe(false);
+    });
+
+    it("a completeShardOp with an unknown nonce is refused", async () => {
+      const { conn } = await readyConn();
+      expect(
+        await conn.completeShardOp({
+          nonce: "never-issued",
+          op_type: "Follow",
+          payload: "00",
+          seq: 1,
+          signer_pubkey: OWNER_VK,
+          signature: "sig",
+        }),
+      ).toBe(false);
+    });
+
+    it("dropPendingShardOp clears a stranded op exactly once", async () => {
+      const { conn } = await readyConn();
+      const signFollowMock = (await import("./identity"))
+        .signFollow as unknown as ReturnType<typeof vi.fn>;
+      signFollowMock.mockClear();
+      await conn.followUser(TARGET_VK, true);
+      const nonce = signFollowMock.mock.calls[0][0] as string;
+
+      expect(conn.dropPendingShardOp(nonce)).toBe(true);
+      expect(conn.dropPendingShardOp(nonce)).toBe(false); // already consumed
+    });
+
+    it("emits only live follows — a tombstone is not a follow", async () => {
+      const { api, callbacks } = await readyConn();
+      callbacks.onFollowsUpdated.mockClear();
+
+      // The contract keeps unfollows as `following: false` records so a stale
+      // follow cannot resurrect them; the UI must see only the live set.
+      deliverOwnerState(api, {
+        [TARGET_VK]: { seq: 2, following: true },
+        ["ef".repeat(1952)]: { seq: 5, following: false },
+      });
+
+      expect(callbacks.onFollowsUpdated).toHaveBeenCalled();
+      const followCalls = callbacks.onFollowsUpdated.mock.calls;
+      const emitted = followCalls[followCalls.length - 1][0] as {
+        following: Set<string>;
+      };
+      expect(emitted.following.has(TARGET_VK)).toBe(true);
+      expect(emitted.following.size).toBe(1);
+    });
+
+    it("reads a followed user's shard but never PUTs it", async () => {
+      const { api, callbacks } = await readyConn();
+      const putsBefore = api.putCalls.length;
+      callbacks.onFollowsUpdated.mockClear();
+
+      deliverOwnerState(api, { [TARGET_VK]: { seq: 1, following: true } });
+      await drainGets(api);
+
+      // Instantiating someone else's shard would write an empty state under
+      // their key, which we have no signature for — read-only is the invariant.
+      expect(api.putCalls.length).toBe(putsBefore);
+    });
+
+    it("subscribes to a followed shard only AFTER its GET resolves", async () => {
+      const { api, callbacks } = await readyConn();
+      const subsBefore = api.subscribeCalls.length;
+      callbacks.onFollowsUpdated.mockClear();
+
+      deliverOwnerState(api, { [TARGET_VK]: { seq: 1, following: true } });
+      await flush();
+      // GET is out, but the node rejects a subscribe to a contract it does not
+      // hold yet — so nothing is subscribed until the GET comes back.
+      expect(api.subscribeCalls.length).toBe(subsBefore);
+
+      const followedGet = api.getCalls[api.getCalls.length - 1];
+      followedGet.resolve({} as GetResponse);
+      await flush();
+      await flush();
+      expect(api.subscribeCalls.length).toBe(subsBefore + 1);
+    });
+
+    it("an unfollow stops routing that shard's notifications back into the feed", async () => {
+      const { api, callbacks } = await readyConn();
+      deliverOwnerState(api, { [TARGET_VK]: { seq: 1, following: true } });
+      await flush();
+      const followedGet = api.getCalls[api.getCalls.length - 1];
+      api.handler.onContractGet({
+        key: followedGet.req.key,
+        state: Array.from(
+          new TextEncoder().encode(
+            JSON.stringify({
+              posts: [
+                {
+                  id: "p1",
+                  author_pubkey: TARGET_VK,
+                  author_name: "Bob",
+                  author_handle: "@bob",
+                  content: "hi",
+                  timestamp: 1000,
+                  signature: "s",
+                },
+              ],
+            }),
+          ),
+        ),
+      } as unknown as GetResponse);
+
+      let feedCalls = callbacks.onFollowingPostsLoaded.mock.calls;
+      expect((feedCalls[feedCalls.length - 1][0] as Post[]).length).toBe(1);
+
+      // Unfollow: the contract records a tombstone, not a removal.
+      callbacks.onFollowingPostsLoaded.mockClear();
+      deliverOwnerState(api, { [TARGET_VK]: { seq: 9, following: false } });
+      await flush();
+      feedCalls = callbacks.onFollowingPostsLoaded.mock.calls;
+      expect((feedCalls[feedCalls.length - 1][0] as Post[]).length).toBe(0);
+
+      // A late notification from the (still node-side subscribed) shard must
+      // NOT resurrect them — the reverse index entry is gone.
+      callbacks.onFollowingPostsLoaded.mockClear();
+      api.handler.onContractGet({
+        key: followedGet.req.key,
+        state: Array.from(
+          new TextEncoder().encode(
+            JSON.stringify({
+              posts: [
+                {
+                  id: "p2",
+                  author_pubkey: TARGET_VK,
+                  author_name: "Bob",
+                  author_handle: "@bob",
+                  content: "later",
+                  timestamp: 5000,
+                  signature: "s",
+                },
+              ],
+            }),
+          ),
+        ),
+      } as unknown as GetResponse);
+      expect(callbacks.onFollowingPostsLoaded).not.toHaveBeenCalled();
+    });
+
+    it("aggregates a followed user's posts into the Following feed, top-level only", async () => {
+      const { api, callbacks } = await readyConn();
+      deliverOwnerState(api, { [TARGET_VK]: { seq: 1, following: true } });
+      await flush();
+
+      // The GET issued for the followed shard is the most recent one.
+      const followedGet = api.getCalls[api.getCalls.length - 1];
+      callbacks.onFollowingPostsLoaded.mockClear();
+      api.handler.onContractGet({
+        key: followedGet.req.key,
+        state: Array.from(
+          new TextEncoder().encode(
+            JSON.stringify({
+              posts: [
+                {
+                  id: "p-old",
+                  author_pubkey: TARGET_VK,
+                  author_name: "Bob",
+                  author_handle: "@bob",
+                  content: "older",
+                  timestamp: 1000,
+                  signature: "s",
+                },
+                {
+                  id: "p-new",
+                  author_pubkey: TARGET_VK,
+                  author_name: "Bob",
+                  author_handle: "@bob",
+                  content: "newer",
+                  timestamp: 2000,
+                  signature: "s",
+                },
+                {
+                  id: "p-reply",
+                  author_pubkey: TARGET_VK,
+                  author_name: "Bob",
+                  author_handle: "@bob",
+                  content: "a reply",
+                  timestamp: 3000,
+                  reply_to: "somewhere",
+                  signature: "s",
+                },
+              ],
+            }),
+          ),
+        ),
+      } as unknown as GetResponse);
+
+      expect(callbacks.onFollowingPostsLoaded).toHaveBeenCalled();
+      const feedCalls = callbacks.onFollowingPostsLoaded.mock.calls;
+      const feed = feedCalls[feedCalls.length - 1][0] as Post[];
+      // Replies live on their author's shard too, but the feed is top-level.
+      expect(feed.map((p) => p.id)).toEqual(["p-new", "p-old"]);
+    });
+  });
+
+  describe("retraction — withdrawal, not deletion", () => {
+    async function readyConn2() {
+      const { conn, api, callbacks } = makeConnection();
+      conn.setUser(OWNER_VK, "Alice", "alice");
+      await drainGets(api);
+      return { conn, api, callbacks };
+    }
+
+    it("signs for BOTH scopes, because the two contracts judge differently", async () => {
+      const { conn } = await readyConn2();
+      const signRetractMock = (await import("./identity"))
+        .signRetract as unknown as ReturnType<typeof vi.fn>;
+      signRetractMock.mockClear();
+
+      expect(await conn.retractPosts(["post-1"])).toBe(true);
+      expect(signRetractMock).toHaveBeenCalledTimes(2);
+      const scopes = signRetractMock.mock.calls.map((c) => c[3]);
+      expect(scopes).toEqual(["user", "index"]);
+      // Same ids and same seq across both — only the binding differs.
+      expect(signRetractMock.mock.calls[0][1]).toEqual(["post-1"]);
+      expect(signRetractMock.mock.calls[0][2]).toBe(
+        signRetractMock.mock.calls[1][2],
+      );
+    });
+
+    it("routes a user-scope op to the owner shard as ShardDelta::Op", async () => {
+      const { conn, api } = await readyConn2();
+      const signRetractMock = (await import("./identity"))
+        .signRetract as unknown as ReturnType<typeof vi.fn>;
+      signRetractMock.mockClear();
+      await conn.retractPosts(["post-1"]);
+      const userNonce = signRetractMock.mock.calls[0][0] as string;
+
+      const before = api.updateCalls.length;
+      await conn.completeShardOp({
+        nonce: userNonce,
+        op_type: "RetractPost",
+        payload: "00",
+        seq: 5,
+        signer_pubkey: OWNER_VK,
+        signature: "sig",
+        scope: "user",
+      });
+      expect(api.updateCalls.length).toBe(before + 1);
+      const sent = api.updateCalls[api.updateCalls.length - 1];
+      const body = JSON.parse(
+        new TextDecoder().decode(
+          Uint8Array.from(
+            (sent as { data: { updateData: { delta: number[] } } }).data
+              .updateData.delta,
+          ),
+        ),
+      ) as { Op?: unknown; Retract?: unknown };
+      expect(body.Op).toBeDefined();
+      expect(body.Retract).toBeUndefined();
+    });
+
+    it("refuses an empty retraction", async () => {
+      const { conn } = await readyConn2();
+      expect(await conn.retractPosts([])).toBe(false);
     });
   });
 

@@ -47,6 +47,9 @@
 //! render time rather than assume the index is reply-free.
 
 use freenet_microblogging_common::post::Post;
+use freenet_microblogging_common::signed_op::{
+    GLOBAL_INDEX_CONTEXT, OpType, SignedOp, decode_id_list, id_list_count_within_bounds,
+};
 use freenet_microblogging_common::thread::WriterCert;
 use freenet_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -73,6 +76,11 @@ use std::collections::BTreeMap;
 /// invariant; `cap_matches_production_value` pins the real value separately.
 #[cfg(not(test))]
 const MAX_INDEX_POSTS: usize = 2000;
+
+/// Cap on retained retraction ops. Pure grow-set for the same reason as the user
+/// shard: dropping a tombstone lets any replica still holding the post
+/// re-introduce it. Evict the lowest seqs first, deterministically.
+const MAX_RETRACT_OPS: usize = 2_000;
 #[cfg(test)]
 const MAX_INDEX_POSTS: usize = 64;
 
@@ -93,6 +101,20 @@ struct GlobalIndexShard {
     /// serialization).
     #[serde(default)]
     posts: BTreeMap<String, Post>,
+    /// Retraction ops keyed by CONTENT ADDRESS (`SignedOp::content_id`), never
+    /// by `seq`. Each is signed by SOME key; which posts it may withdraw is
+    /// decided per-post, not per-op — see [`post_is_retracted`].
+    ///
+    /// The key must be the content address because this is an anyone-writes
+    /// surface and `seq` is client-chosen: keyed by `seq`, two different
+    /// signers' ops collide, whichever arrived first wins on each replica, and
+    /// the replicas diverge permanently (the summary below would report "I have
+    /// seq 5" for two different ops, so sync never ships the missing one). It is
+    /// also a censorship primitive — file a throwaway op at a victim's seq and
+    /// their retraction is dropped wherever it lands second. See
+    /// [`SignedOp::content_id`].
+    #[serde(default)]
+    retract_ops: BTreeMap<String, SignedOp>,
 }
 
 impl<'a> TryFrom<State<'a>> for GlobalIndexShard {
@@ -109,6 +131,11 @@ impl<'a> TryFrom<State<'a>> for GlobalIndexShard {
 enum GlobalIndexDelta {
     /// One or more self-signed top-level `Post`s to index.
     Posts(Vec<Post>),
+    /// A signed retraction naming post ids to withdraw from the public
+    /// timeline. Unlike the user shard there is no single owner here, so
+    /// authority is decided per post: the op applies to a post only if the
+    /// signer is that post's own author.
+    Retract(SignedOp),
 }
 
 /// The writer-credential seam (ADR-0001 abuse model). Today it accepts every
@@ -126,6 +153,9 @@ fn verify_writer_cert(_cert: Option<&WriterCert>) -> bool {
 /// check — the global index is a flat firehose, so any self-verifying post is
 /// eligible regardless of whether it is a reply, quote, or top-level post.
 fn post_is_acceptable(post: &Post) -> bool {
+    // Bounds author name/handle as well as content — the public timeline is the
+    // widest-replicated surface in the system, so an unbounded author field here
+    // costs every node that carries the index.
     post.within_bounds() && post.verify().is_ok() && verify_writer_cert(None)
 }
 
@@ -151,7 +181,11 @@ fn truncate_posts(posts: &mut BTreeMap<String, Post>) {
 /// Normalize a merged state: enforce the cap post-merge. Pure function of the
 /// accumulated set.
 fn normalize(shard: &mut GlobalIndexShard) {
+    // Retractions apply BEFORE truncation, so a withdrawn post never occupies a
+    // slot a live post should have had.
+    apply_retractions(shard);
     truncate_posts(&mut shard.posts);
+    gc_retract_ops(shard);
 }
 
 /// Apply one decoded `GlobalIndexDelta` to the shard. Unacceptable entries are
@@ -168,6 +202,99 @@ fn apply_index_delta(shard: &mut GlobalIndexShard, delta: GlobalIndexDelta) {
                 }
             }
         }
+        GlobalIndexDelta::Retract(op) => {
+            if retract_op_is_acceptable(&op) {
+                shard
+                    .retract_ops
+                    .entry(op.content_id(GLOBAL_INDEX_CONTEXT))
+                    .or_insert(op);
+            }
+        }
+    }
+}
+
+/// A retraction op is retained if it is a well-formed, self-consistent
+/// signature over a non-empty id list, bound to this contract's context.
+///
+/// Note what is NOT checked here: WHOSE posts it may withdraw. There is no
+/// owner on this contract, so authority cannot be decided when the op arrives —
+/// only when it is matched against a specific post. Retaining an op says
+/// "somebody signed this", never "this is authorized".
+fn retract_op_is_acceptable(op: &SignedOp) -> bool {
+    // `within_bounds` before anything else: this is an anyone-writes surface
+    // with no owner check, so the payload's SIZE is attacker-chosen and a
+    // signature does not bound it. `decode_id_list` caps what it INTERPRETS at
+    // MAX_IDS_PER_OP, which says nothing about how many bytes get stored.
+    if op.op_type != OpType::RetractPost
+        || !op.within_bounds()
+        || !id_list_count_within_bounds(&op.payload)
+        || decode_id_list(&op.payload).is_empty()
+    {
+        return false;
+    }
+    // Self-verify: the signer field must match the signature over the payload.
+    // `verify` also takes the expected signer, which here IS the claimed signer —
+    // we are proving internal consistency, not authorization.
+    op.verify(GLOBAL_INDEX_CONTEXT, &op.signer_pubkey.clone())
+        .is_ok()
+}
+
+/// Whether `post` is withdrawn by some retained retraction.
+///
+/// THE conditional rule that makes retraction safe on a public-write surface: a
+/// retraction applies to a post only when the signer is that post's own author.
+/// Consequences worth stating, because each is an attack that fails:
+///
+///   - retracting somebody else's post id is inert; the author check fails
+///   - pre-emptively retracting an id before the post exists is inert for the
+///     same reason, and stays inert when the post arrives unless the retractor
+///     really was its author
+///   - an id you did not author gives you no authority over it, no matter how
+///     many keys you hold, because authorship is proved by the post's own
+///     signature, not by who spoke first
+fn post_is_retracted(shard: &GlobalIndexShard, post: &Post) -> bool {
+    shard.retract_ops.values().any(|op| {
+        op.signer_pubkey == post.author_pubkey && decode_id_list(&op.payload).contains(&post.id)
+    })
+}
+
+/// Drop every post withdrawn by its own author.
+fn apply_retractions(shard: &mut GlobalIndexShard) {
+    if shard.retract_ops.is_empty() {
+        return;
+    }
+    let doomed: Vec<String> = shard
+        .posts
+        .values()
+        .filter(|p| post_is_retracted(shard, p))
+        .map(|p| p.id.clone())
+        .collect();
+    for id in doomed {
+        shard.posts.remove(&id);
+    }
+}
+
+/// Bound retained retraction ops; evict the lowest seqs first so every replica
+/// evicts the identical set. Lossy by the same trade as the post window.
+fn gc_retract_ops(shard: &mut GlobalIndexShard) {
+    if shard.retract_ops.len() <= MAX_RETRACT_OPS {
+        return;
+    }
+    let excess = shard.retract_ops.len() - MAX_RETRACT_OPS;
+    // Keys are content addresses, so map order is hash order, not seq order —
+    // hence the explicit sort on `(seq, key)`. What convergence needs is only
+    // that the order be TOTAL and agreed on by every replica holding the same
+    // set; oldest-first is the intent layered on top, and it is exact except
+    // between ops sharing a `seq`, where the tie-break is arbitrary but
+    // identical everywhere.
+    let mut by_age: Vec<(u64, String)> = shard
+        .retract_ops
+        .iter()
+        .map(|(k, op)| (op.seq, k.clone()))
+        .collect();
+    by_age.sort();
+    for (_, key) in by_age.into_iter().take(excess) {
+        shard.retract_ops.remove(&key);
     }
 }
 
@@ -202,6 +329,16 @@ fn apply_delta_bytes(shard: &mut GlobalIndexShard, bytes: &[u8]) -> Result<(), C
 /// post is a full self-verifying record, re-checked here — a post is never
 /// trusted on the sender's say-so (the sender may be adversarial).
 fn apply_state_delta(shard: &mut GlobalIndexShard, sd: GlobalIndexStateDelta) {
+    // Retractions first, so a post arriving alongside its own withdrawal in the
+    // same sync delta never lands as live.
+    for op in sd.retractions {
+        if retract_op_is_acceptable(&op) {
+            shard
+                .retract_ops
+                .entry(op.content_id(GLOBAL_INDEX_CONTEXT))
+                .or_insert(op);
+        }
+    }
     for post in sd.posts {
         if post_is_acceptable(&post) {
             shard.posts.entry(post.id.clone()).or_insert(post);
@@ -215,6 +352,19 @@ fn apply_state_delta(shard: &mut GlobalIndexShard, sd: GlobalIndexStateDelta) {
 /// possibly-adversarial peer, so "it was already validated upstream" is not an
 /// assumption the contract may make (review CRITICAL / M-1).
 fn merge_state(shard: &mut GlobalIndexShard, other: GlobalIndexShard) {
+    // Retractions merge FIRST, so a post arriving in the same merge as its own
+    // withdrawal never survives it.
+    // Re-derive the key from the op rather than trusting `other`'s: a peer
+    // could otherwise file a valid op under a key that is not its content
+    // address, which `validate_state` would then reject as a misfiled op.
+    for (_, op) in other.retract_ops {
+        if retract_op_is_acceptable(&op) {
+            shard
+                .retract_ops
+                .entry(op.content_id(GLOBAL_INDEX_CONTEXT))
+                .or_insert(op);
+        }
+    }
     for (id, post) in other.posts {
         if post_is_acceptable(&post) {
             shard.posts.entry(id).or_insert(post);
@@ -240,6 +390,21 @@ impl ContractInterface for GlobalIndexShard {
             if id != &post.id || !post_is_acceptable(post) {
                 return Err(ContractError::InvalidState);
             }
+        }
+        // Retractions: each retained op must be internally consistent and filed
+        // under its own seq. An inconsistent or misfiled op is rejected outright,
+        // so a peer cannot ship a state whose tombstones it did not sign.
+        for (key, op) in &shard.retract_ops {
+            if *key != op.content_id(GLOBAL_INDEX_CONTEXT) || !retract_op_is_acceptable(op) {
+                return Err(ContractError::InvalidState);
+            }
+        }
+        if shard.retract_ops.len() > MAX_RETRACT_OPS {
+            return Err(ContractError::InvalidState);
+        }
+        // No post may survive its own author's retraction.
+        if shard.posts.values().any(|p| post_is_retracted(&shard, p)) {
+            return Err(ContractError::InvalidState);
         }
         Ok(ValidateResult::Valid)
     }
@@ -282,6 +447,7 @@ impl ContractInterface for GlobalIndexShard {
         // requester is missing. Keys are deterministic (BTreeMap order).
         let summary = GlobalIndexSummary {
             posts: shard.posts.keys().cloned().collect(),
+            retractions: shard.retract_ops.keys().cloned().collect(),
         };
         let bytes =
             serde_json::to_vec(&summary).map_err(|e| ContractError::Other(format!("{e}")))?;
@@ -307,8 +473,18 @@ impl ContractInterface for GlobalIndexShard {
             .map(|(_, p)| p.clone())
             .collect();
 
+        let have_retractions: std::collections::HashSet<&String> =
+            have.retractions.iter().collect();
+        let missing_retractions: Vec<SignedOp> = shard
+            .retract_ops
+            .iter()
+            .filter(|(key, _)| !have_retractions.contains(key))
+            .map(|(_, op)| op.clone())
+            .collect();
+
         let delta = GlobalIndexStateDelta {
             posts: missing_posts,
+            retractions: missing_retractions,
         };
         let bytes = serde_json::to_vec(&delta).map_err(|e| ContractError::Other(format!("{e}")))?;
         Ok(StateDelta::from(bytes))
@@ -321,6 +497,16 @@ impl ContractInterface for GlobalIndexShard {
 struct GlobalIndexSummary {
     #[serde(default)]
     posts: Vec<String>,
+    /// Content addresses of retained retractions. Without these a peer holding
+    /// a withdrawal we lack would summarize identically and never send it, so
+    /// the post would stay live here after its author withdrew it.
+    ///
+    /// Content addresses, not seqs, for the reason the state map is keyed that
+    /// way: two different ops sharing a seq would summarize as the same entry,
+    /// so each side would believe the other already had it and neither would
+    /// ever ship it — permanent divergence that looks like successful sync.
+    #[serde(default)]
+    retractions: Vec<String>,
 }
 
 /// The delta `get_state_delta` ships: the missing posts, each a full
@@ -332,11 +518,19 @@ struct GlobalIndexSummary {
 struct GlobalIndexStateDelta {
     #[serde(default)]
     posts: Vec<Post>,
+    /// Retractions the requester lacks. Shipped as full signed ops so the
+    /// receiver re-verifies them — a sync delta is no more trusted than any
+    /// other. Without this the requester would receive posts their authors have
+    /// already withdrawn and treat them as live.
+    #[serde(default)]
+    retractions: Vec<SignedOp>,
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    // Only the tests still name the content bound directly; the acceptance
+    // check goes through `Post::within_bounds`.
     use freenet_microblogging_common::post::MAX_CONTENT_LEN;
     use ml_dsa::KeyGen;
     use ml_dsa::signature::{Keypair, Signer};
@@ -641,17 +835,561 @@ mod test {
             serde_json::from_slice(br#"{"posts":{},"version":2}"#).unwrap();
         assert!(forward.posts.is_empty());
     }
+
+    // -- retraction on a shared-write surface --
+    //
+    // The index has no owner, so authority is decided per post, not per op: a
+    // retraction withdraws a post only if the signer is that post's own author.
+    // Every test below asks the same question: does this grant authority over a
+    // post? The answer must be no in each case except the author's own.
+
+    fn retract_op_by(seed: [u8; 32], ids: &[&str], seq: u64) -> SignedOp {
+        use freenet_microblogging_common::signed_op::encode_id_list;
+        let sk = MlDsa65::from_seed(&seed.into());
+        let owned: Vec<String> = ids.iter().map(|s| (*s).to_string()).collect();
+        let mut o = SignedOp {
+            op_type: OpType::RetractPost,
+            payload: encode_id_list(&owned),
+            seq,
+            signer_pubkey: hex::encode(sk.verifying_key().encode()),
+            signature: None,
+        };
+        let sig: ml_dsa::Signature<MlDsa65> = sk.sign(&o.signing_payload(GLOBAL_INDEX_CONTEXT));
+        o.signature = Some(hex::encode(sig.encode()));
+        o
+    }
+
+    #[test]
+    fn an_author_can_withdraw_their_own_post() {
+        let author = [1u8; 32];
+        let p = signed_post(author, "regrettable", 100);
+        let id = p.id.clone();
+
+        let shard = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Posts(vec![p])),
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(author, &[&id], 1))),
+            ],
+        );
+        assert!(shard.posts.is_empty());
+        assert_eq!(shard.retract_ops.len(), 1);
+    }
+
+    #[test]
+    fn a_stranger_cannot_withdraw_someone_elses_post() {
+        // The case the per-post rule exists for. A valid signature from ANY key
+        // would be enough if authority were decided per op instead.
+        let author = [1u8; 32];
+        let non_author = [2u8; 32];
+        let p = signed_post(author, "inconvenient", 100);
+        let id = p.id.clone();
+
+        let shard = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Posts(vec![p])),
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(
+                    non_author,
+                    &[&id],
+                    1,
+                ))),
+            ],
+        );
+        assert_eq!(shard.posts.len(), 1, "a non-author withdrew a post");
+    }
+
+    #[test]
+    fn a_pre_emptive_retraction_by_a_stranger_stays_inert() {
+        // Retract the id BEFORE the post exists, hoping to block it on arrival.
+        let author = [1u8; 32];
+        let non_author = [2u8; 32];
+        let p = signed_post(author, "inconvenient", 100);
+        let id = p.id.clone();
+
+        let shard = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(
+                    non_author,
+                    &[&id],
+                    1,
+                ))),
+                delta_item(&GlobalIndexDelta::Posts(vec![p])),
+            ],
+        );
+        assert_eq!(
+            shard.posts.len(),
+            1,
+            "pre-emptive retraction blocked a post"
+        );
+    }
+
+    #[test]
+    fn an_authors_retraction_holds_even_if_it_arrives_first() {
+        let author = [1u8; 32];
+        let p = signed_post(author, "regrettable", 100);
+        let id = p.id.clone();
+
+        let shard = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(author, &[&id], 1))),
+                delta_item(&GlobalIndexDelta::Posts(vec![p])),
+            ],
+        );
+        assert!(
+            shard.posts.is_empty(),
+            "post survived its author's retraction"
+        );
+    }
+
+    #[test]
+    fn a_withdrawn_post_cannot_be_reinserted() {
+        let author = [1u8; 32];
+        let p = signed_post(author, "regrettable", 100);
+        let id = p.id.clone();
+
+        let shard = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Posts(vec![p.clone()])),
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(author, &[&id], 1))),
+            ],
+        );
+        let shard = run_update(shard, vec![delta_item(&GlobalIndexDelta::Posts(vec![p]))]);
+        assert!(shard.posts.is_empty(), "withdrawn post was re-indexed");
+    }
+
+    #[test]
+    fn validate_rejects_a_state_where_a_withdrawn_post_is_still_live() {
+        let author = [1u8; 32];
+        let p = signed_post(author, "regrettable", 100);
+        let id = p.id.clone();
+        let mut shard = GlobalIndexShard::default();
+        shard.posts.insert(p.id.clone(), p);
+        let op = retract_op_by(author, &[&id], 1);
+        shard
+            .retract_ops
+            .insert(op.content_id(GLOBAL_INDEX_CONTEXT), op);
+
+        assert!(
+            GlobalIndexShard::validate_state(
+                params(),
+                state_of(&shard),
+                RelatedContracts::default(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn retractions_travel_over_the_sync_delta() {
+        // A holds the withdrawal, B still serves the post. After B syncs from A,
+        // B must stop serving it — otherwise withdrawal only works where it was
+        // issued, which is no withdrawal at all.
+        let author = [1u8; 32];
+        let p = signed_post(author, "regrettable", 100);
+        let id = p.id.clone();
+
+        let a = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Posts(vec![p.clone()])),
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(author, &[&id], 1))),
+            ],
+        );
+        let b = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Posts(vec![p]))],
+        );
+        assert_eq!(b.posts.len(), 1);
+
+        let b_summary = GlobalIndexShard::summarize_state(params(), state_of(&b)).unwrap();
+        let delta = GlobalIndexShard::get_state_delta(params(), state_of(&a), b_summary).unwrap();
+        let b2 = run_update(
+            b,
+            vec![UpdateData::Delta(StateDelta::from(
+                delta.into_bytes().to_vec(),
+            ))],
+        );
+        assert!(b2.posts.is_empty(), "peer kept a post its author withdrew");
+    }
+
+    // -- retraction ops are keyed by CONTENT ADDRESS, not by `seq` --
+    //
+    // `seq` is client-chosen (`Date.now()`) and is NOT scoped to the signer,
+    // and this is an anyone-writes surface. Keyed by `seq`, two different
+    // signers' ops collide in one map slot, `or_insert` keeps whichever landed
+    // first, and replicas that saw them in different orders keep different ops
+    // — permanent divergence that `validate_state` cannot see, because each
+    // replica is internally self-consistent. It is also a censorship
+    // primitive. These tests fail if the key reverts to `seq`.
+
+    #[test]
+    fn two_signers_retracting_at_the_same_seq_both_survive() {
+        let alice = [1u8; 32];
+        let bob = [2u8; 32];
+        let pa = signed_post(alice, "alice regrets this", 100);
+        let pb = signed_post(bob, "bob regrets this", 101);
+        let (ida, idb) = (pa.id.clone(), pb.id.clone());
+
+        // The SAME seq for both — the collision the old `seq` key could not
+        // survive.
+        let shard = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Posts(vec![pa, pb])),
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(alice, &[&ida], 7))),
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(bob, &[&idb], 7))),
+            ],
+        );
+
+        assert_eq!(
+            shard.retract_ops.len(),
+            2,
+            "one signer's retraction displaced the other's"
+        );
+        assert!(
+            shard.posts.is_empty(),
+            "a post survived its own author's withdrawal"
+        );
+    }
+
+    #[test]
+    fn a_stranger_cannot_block_a_retraction_by_squatting_its_seq() {
+        // The censorship shape: an attacker who sees (or guesses) the seq a
+        // victim is about to use files a throwaway self-signed op at that seq
+        // FIRST. Under `seq` keying, `or_insert` then silently drops the
+        // victim's real retraction on every replica the attacker reached first,
+        // so the post they tried to withdraw stays live forever.
+        let victim = [1u8; 32];
+        let attacker = [9u8; 32];
+        let p = signed_post(victim, "please take this down", 100);
+        let id = p.id.clone();
+
+        let shard = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Posts(vec![p])),
+                // Attacker gets there first, same seq, naming an unrelated id.
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(
+                    attacker,
+                    &["unrelated-id"],
+                    42,
+                ))),
+                delta_item(&GlobalIndexDelta::Retract(retract_op_by(
+                    victim,
+                    &[&id],
+                    42,
+                ))),
+            ],
+        );
+
+        assert!(
+            shard.posts.is_empty(),
+            "a squatted seq blocked the author's own withdrawal"
+        );
+    }
+
+    #[test]
+    fn colliding_seq_retractions_converge_regardless_of_arrival_order() {
+        // The convergence property directly: the same two ops applied in
+        // opposite orders must produce byte-identical state. Under `seq`
+        // keying each order keeps a DIFFERENT op, and neither replica can tell.
+        let alice = [1u8; 32];
+        let bob = [2u8; 32];
+        let a_op = retract_op_by(alice, &["id-a"], 7);
+        let b_op = retract_op_by(bob, &["id-b"], 7);
+
+        let ab = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Retract(a_op.clone())),
+                delta_item(&GlobalIndexDelta::Retract(b_op.clone())),
+            ],
+        );
+        let ba = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Retract(b_op)),
+                delta_item(&GlobalIndexDelta::Retract(a_op)),
+            ],
+        );
+
+        assert_eq!(
+            serde_json::to_vec(&ab).unwrap(),
+            serde_json::to_vec(&ba).unwrap(),
+            "arrival order changed the retained retraction set"
+        );
+    }
+
+    #[test]
+    fn colliding_seq_retractions_both_travel_over_the_sync_delta() {
+        // The summary half of the same bug. Summarized by `seq`, a replica
+        // holding op_A@7 and a peer holding op_B@7 each report "I have 7", so
+        // each believes the other is already up to date and neither ever ships
+        // its op — the divergence is invisible AND unrecoverable.
+        let alice = [1u8; 32];
+        let bob = [2u8; 32];
+
+        let a = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Retract(retract_op_by(
+                alice,
+                &["id-a"],
+                7,
+            )))],
+        );
+        let b = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Retract(retract_op_by(
+                bob,
+                &["id-b"],
+                7,
+            )))],
+        );
+        assert_eq!(a.retract_ops.len(), 1);
+        assert_eq!(b.retract_ops.len(), 1);
+
+        let b_summary = GlobalIndexShard::summarize_state(params(), state_of(&b)).unwrap();
+        let d = GlobalIndexShard::get_state_delta(params(), state_of(&a), b_summary).unwrap();
+        let b2 = run_update(
+            b,
+            vec![UpdateData::Delta(StateDelta::from(d.into_bytes().to_vec()))],
+        );
+
+        assert_eq!(
+            b2.retract_ops.len(),
+            2,
+            "sync never shipped the op the peer was missing"
+        );
+    }
+
+    #[test]
+    fn an_oversized_retraction_payload_is_rejected() {
+        // `decode_id_list` caps what it INTERPRETS at MAX_IDS_PER_OP; it says
+        // nothing about how many BYTES get stored. On an anyone-writes surface
+        // with no owner check, and with ML-DSA signing a message of any length,
+        // only an explicit ceiling stops a freshly-generated keypair from
+        // parking megabytes in the most-replicated state in the system. Same
+        // class as GHSA-qxwp-8hqx-4wrj.
+        use freenet_microblogging_common::signed_op::{MAX_OP_PAYLOAD_LEN, encode_id_list};
+
+        let sk = MlDsa65::from_seed(&[3u8; 32].into());
+        // Well-formed and decodable, just far too many entries to store.
+        let ids: Vec<String> = (0..40_000).map(|i| format!("id-{i:0>100}")).collect();
+        let mut o = SignedOp {
+            op_type: OpType::RetractPost,
+            payload: encode_id_list(&ids),
+            seq: 1,
+            signer_pubkey: hex::encode(sk.verifying_key().encode()),
+            signature: None,
+        };
+        let sig: ml_dsa::Signature<MlDsa65> = sk.sign(&o.signing_payload(GLOBAL_INDEX_CONTEXT));
+        o.signature = Some(hex::encode(sig.encode()));
+
+        assert!(o.payload.len() > MAX_OP_PAYLOAD_LEN);
+        // The bound is NOT redundant with the signature: this op is
+        // cryptographically valid, and it decodes to a non-empty id list.
+        assert!(
+            o.verify(GLOBAL_INDEX_CONTEXT, &o.signer_pubkey.clone())
+                .is_ok()
+        );
+        assert!(!decode_id_list(&o.payload).is_empty());
+
+        let shard = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Retract(o))],
+        );
+        assert!(
+            shard.retract_ops.is_empty(),
+            "an unbounded payload was stored in replicated state"
+        );
+    }
+
+    // -- the merge laws, asserted directly --
+    //
+    // Freenet requires a contract's merge to be an idempotent commutative
+    // monoid: applying the same op twice equals applying it once, and ANY
+    // permutation of the same op set produces byte-identical state. A test that
+    // only checks "the tombstone is present" passes under a merge that violates
+    // both. These assert the laws themselves, over the retraction surface where
+    // the `seq`-keying defect lived. See freenet-core#5320, which exists
+    // because non-converging contract merges are a live production problem.
+
+    /// Every ordering of `ops`, applied to an empty shard, must serialize
+    /// identically. Returns the canonical bytes so callers can compare further.
+    fn all_permutations_agree(ops: &[SignedOp]) -> Vec<u8> {
+        fn permute(ops: &[SignedOp]) -> Vec<Vec<SignedOp>> {
+            if ops.len() <= 1 {
+                return vec![ops.to_vec()];
+            }
+            let mut out = Vec::new();
+            for i in 0..ops.len() {
+                let mut rest = ops.to_vec();
+                let head = rest.remove(i);
+                for mut tail in permute(&rest) {
+                    let mut one = vec![head.clone()];
+                    one.append(&mut tail);
+                    out.push(one);
+                }
+            }
+            out
+        }
+
+        let orders = permute(ops);
+        assert!(
+            orders.len() >= 6,
+            "need at least 3 ops for this to test anything about ordering"
+        );
+
+        let mut canonical: Option<Vec<u8>> = None;
+        for order in orders {
+            let shard = run_update(
+                GlobalIndexShard::default(),
+                order
+                    .iter()
+                    .map(|o| delta_item(&GlobalIndexDelta::Retract(o.clone())))
+                    .collect(),
+            );
+            let bytes = serde_json::to_vec(&shard).unwrap();
+            match &canonical {
+                None => canonical = Some(bytes),
+                Some(first) => assert_eq!(
+                    *first, bytes,
+                    "a permutation of the same op set produced different state"
+                ),
+            }
+        }
+        canonical.unwrap()
+    }
+
+    #[test]
+    fn retraction_merge_is_commutative_over_every_permutation() {
+        // Three signers, ALL sharing one seq — the collision case, at a size
+        // where "it happened to work for this order" is not an explanation.
+        let ops = vec![
+            retract_op_by([1u8; 32], &["id-a"], 7),
+            retract_op_by([2u8; 32], &["id-b"], 7),
+            retract_op_by([3u8; 32], &["id-c"], 7),
+        ];
+        let canonical = all_permutations_agree(&ops);
+
+        let shard: GlobalIndexShard = serde_json::from_slice(&canonical).unwrap();
+        assert_eq!(
+            shard.retract_ops.len(),
+            3,
+            "every distinct op must be retained, or the ops are not all being merged"
+        );
+    }
+
+    #[test]
+    fn retraction_merge_is_idempotent() {
+        // Applying an op twice must equal applying it once. With a content
+        // address this holds by construction; with any key derived from
+        // mutable or re-chosen data it would not.
+        let op = retract_op_by([1u8; 32], &["id-a"], 7);
+
+        let once = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Retract(op.clone()))],
+        );
+        let twice = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Retract(op.clone())),
+                delta_item(&GlobalIndexDelta::Retract(op.clone())),
+            ],
+        );
+        // Also re-apply onto the already-merged state, which is the shape a
+        // real re-gossip takes.
+        let c = serde_json::to_vec(&once).unwrap();
+        let again = run_update(once, vec![delta_item(&GlobalIndexDelta::Retract(op))]);
+        assert_eq!(c, serde_json::to_vec(&twice).unwrap(), "f(x,x) != f(x)");
+        assert_eq!(
+            c,
+            serde_json::to_vec(&again).unwrap(),
+            "re-gossip changed state"
+        );
+    }
+
+    #[test]
+    fn retraction_merge_is_associative() {
+        // (a·b)·c == a·(b·c). Distinct from commutativity: a merge can be
+        // order-insensitive pairwise and still depend on how the ops were
+        // GROUPED into deltas, which is exactly what differs between a batched
+        // sync delta and a stream of single-op deltas.
+        let a = retract_op_by([1u8; 32], &["id-a"], 7);
+        let b = retract_op_by([2u8; 32], &["id-b"], 7);
+        let c = retract_op_by([3u8; 32], &["id-c"], 7);
+
+        let ab = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Retract(a.clone())),
+                delta_item(&GlobalIndexDelta::Retract(b.clone())),
+            ],
+        );
+        let ab_c = run_update(ab, vec![delta_item(&GlobalIndexDelta::Retract(c.clone()))]);
+
+        let bc = run_update(
+            GlobalIndexShard::default(),
+            vec![
+                delta_item(&GlobalIndexDelta::Retract(b)),
+                delta_item(&GlobalIndexDelta::Retract(c)),
+            ],
+        );
+        let a_bc = run_update(bc, vec![delta_item(&GlobalIndexDelta::Retract(a))]);
+
+        assert_eq!(
+            serde_json::to_vec(&ab_c).unwrap(),
+            serde_json::to_vec(&a_bc).unwrap(),
+            "grouping changed the result"
+        );
+    }
+
+    #[test]
+    fn an_overlong_id_list_is_refused_not_truncated() {
+        // `decode_id_list` stops at MAX_IDS_PER_OP and returns what it parsed,
+        // so a count check that leaned on it would see a legal-looking 1000-id
+        // list and accept a PREFIX of what the signer actually signed. Storing
+        // part of an op the author never authorized in that form is the wrong
+        // answer at an acceptance boundary — fail closed instead.
+        use freenet_microblogging_common::signed_op::{MAX_IDS_PER_OP, encode_id_list};
+
+        let sk = MlDsa65::from_seed(&[4u8; 32].into());
+        let ids: Vec<String> = (0..MAX_IDS_PER_OP + 1).map(|i| format!("id-{i}")).collect();
+        let mut o = SignedOp {
+            op_type: OpType::RetractPost,
+            payload: encode_id_list(&ids),
+            seq: 1,
+            signer_pubkey: hex::encode(sk.verifying_key().encode()),
+            signature: None,
+        };
+        let sig: ml_dsa::Signature<MlDsa65> = sk.sign(&o.signing_payload(GLOBAL_INDEX_CONTEXT));
+        o.signature = Some(hex::encode(sig.encode()));
+
+        // Under the BYTE bound this op is perfectly legal — so only the count
+        // bound can refuse it, which is why both halves have to exist.
+        assert!(o.within_bounds(), "fixture must be under the byte ceiling");
+        assert_eq!(
+            decode_id_list(&o.payload).len(),
+            MAX_IDS_PER_OP,
+            "decode must be silently truncating, or this proves nothing"
+        );
+
+        let shard = run_update(
+            GlobalIndexShard::default(),
+            vec![delta_item(&GlobalIndexDelta::Retract(o))],
+        );
+        assert!(
+            shard.retract_ops.is_empty(),
+            "a truncated prefix of the signed list was stored"
+        );
+    }
 }
 
-/// Integration tests: drive the full `ContractInterface` (validate / update /
-/// summarize / get_state_delta) through multi-replica, multi-author scenarios —
-/// the layer above the per-function unit tests. The key scenario is **two
-/// replicas reconciling via the real sync protocol** (`summarize_state` →
-/// `get_state_delta` → `update_state`).
-///
-/// These still call the contract as a Rust library (not compiled WASM in a
-/// node); true WASM-in-node e2e is a separate, heavier tier (see the
-/// `freenet:linux-test` skill and issue #34).
 #[cfg(test)]
 mod integration {
     use super::*;

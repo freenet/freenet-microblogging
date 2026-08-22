@@ -53,6 +53,21 @@ pub enum OpType {
     /// notification whose own `seq` is strictly below it. `payload` is empty.
     /// Owner-only.
     PruneBefore,
+    /// Retract one or more posts the signer authored. `payload` is a
+    /// length-prefixed list of content-addressed post ids (see
+    /// [`encode_id_list`]).
+    ///
+    /// A retraction is not a delete and the type is named so it cannot be
+    /// mistaken for one. On a P2P network no contract can reach an offline
+    /// replica or an archive; what it can do is stop serving the post and
+    /// refuse to re-accept it on merge. The honest claim is "the author
+    /// withdrew this", not "this never existed".
+    ///
+    /// The tombstone is CONDITIONAL, which is what makes it safe on a
+    /// shared surface: it applies to a post only when the retracting signer is
+    /// that post's own author. Retracting somebody else's id — or
+    /// pre-emptively retracting an id before the post arrives — is inert.
+    RetractPost,
 }
 
 impl OpType {
@@ -65,6 +80,7 @@ impl OpType {
             OpType::Unfollow => b"unfollow",
             OpType::PruneIds => b"prune-ids",
             OpType::PruneBefore => b"prune-before",
+            OpType::RetractPost => b"retract-post",
         }
     }
 }
@@ -145,6 +161,134 @@ impl SignedOp {
         vk.verify(&self.signing_payload(context), &sig)
             .map_err(|_| VerifyError::SignatureInvalid)
     }
+
+    /// Whether `payload` is within its bound.
+    ///
+    /// [`MAX_IDS_PER_OP`] and [`MAX_ID_LEN`] bound what [`decode_id_list`] will
+    /// *interpret*, not what the op *carries*: a payload of a million
+    /// well-formed entries decodes to 1000 ids while the whole blob is still
+    /// stored verbatim in replicated contract state. A signature does not bound
+    /// it either — ML-DSA-65 signs a message of any length, so an oversized
+    /// payload is perfectly valid and perfectly storable. Only this does.
+    ///
+    /// Same class as [`Post::within_bounds`](crate::post::Post::within_bounds),
+    /// and it matters most on the global index, where retraction ops are
+    /// accepted from *any* signer: there is no owner check to fall back on, so
+    /// an unbounded payload there is an unbounded write primitive available to
+    /// anyone with a freshly generated keypair.
+    pub fn within_bounds(&self) -> bool {
+        self.payload.len() <= MAX_OP_PAYLOAD_LEN
+    }
+
+    /// Content address of this op: BLAKE3 over the exact bytes the signature
+    /// covers, hex-encoded.
+    ///
+    /// This is what retraction maps are keyed by, and the reason is
+    /// convergence, not tidiness. Keying by `seq` alone does not work: `seq` is
+    /// chosen client-side and is not scoped to the signer, so two *different*
+    /// ops can land on the same key. Whichever reached a replica first would
+    /// win there, so replicas that saw them in different orders would keep
+    /// different ops — a state that no `validate_state` can detect, because
+    /// each replica is internally self-consistent. On the global index, where
+    /// any key may sign a retraction, that also hands an attacker a censorship
+    /// primitive: file a throwaway op at the seq a victim is about to use and
+    /// their real retraction is dropped everywhere it arrives second.
+    ///
+    /// A content address cannot collide across distinct ops and is necessarily
+    /// identical for identical ones, which is exactly the union-by-key
+    /// behaviour a grow-only set needs. `context` is included because it is
+    /// part of the signed bytes: the same op is a different op on a different
+    /// shard type.
+    pub fn content_id(&self, context: &[u8]) -> String {
+        hex::encode(blake3::hash(&self.signing_payload(context)).as_bytes())
+    }
+}
+
+/// Maximum byte length of [`SignedOp::payload`].
+///
+/// Sized as the largest legitimate [`encode_id_list`] payload: [`MAX_IDS_PER_OP`]
+/// entries, each a `u32` length prefix plus at most [`MAX_ID_LEN`] bytes. An op
+/// larger than that cannot decode to anything the contracts will act on, so
+/// there is no honest reason to carry it — and every dishonest one.
+pub const MAX_OP_PAYLOAD_LEN: usize = MAX_IDS_PER_OP * (4 + MAX_ID_LEN);
+
+/// Maximum length of a single id in an [`encode_id_list`] payload.
+pub const MAX_ID_LEN: usize = 128;
+
+/// Maximum number of ids a single op payload may carry.
+pub const MAX_IDS_PER_OP: usize = 1_000;
+
+/// Encode a list of ids as a length-prefixed (u32 LE) sequence.
+///
+/// Shared by every op whose payload is "a set of ids the signer names": the
+/// inbox's `PruneIds` and the user shard's / global index's [`OpType::RetractPost`].
+/// One encoder, because the bytes go INSIDE the signature — two implementations
+/// that drift by a byte produce ops that verify on one side and not the other,
+/// and the failure mode is a silent drop, not an error.
+pub fn encode_id_list(ids: &[String]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for id in ids {
+        buf.extend_from_slice(&(id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(id.as_bytes());
+    }
+    buf
+}
+
+/// Whether an [`encode_id_list`] payload carries at most [`MAX_IDS_PER_OP`] ids.
+///
+/// [`decode_id_list`] is deliberately TOLERANT — it stops at
+/// [`MAX_IDS_PER_OP`] and returns what it parsed — so on its own it silently
+/// TRUNCATES an over-long list rather than refusing it. Truncation is the wrong
+/// answer at an acceptance boundary: the signer signed a list, and storing a
+/// prefix of it applies part of an op the author never authorized in that form.
+/// Acceptance therefore fails CLOSED on the count, using this, while
+/// `decode_id_list` keeps its tolerant contract for read paths.
+///
+/// This is the COUNT half of the bound; [`SignedOp::within_bounds`] is the BYTE
+/// half. Both are needed: a payload can be under the byte ceiling while naming
+/// far too many ids, and under the id ceiling while carrying junk bytes.
+pub fn id_list_count_within_bounds(payload: &[u8]) -> bool {
+    let mut count = 0usize;
+    let mut i = 0;
+    while i + 4 <= payload.len() {
+        let len = u32::from_le_bytes([payload[i], payload[i + 1], payload[i + 2], payload[i + 3]])
+            as usize;
+        i += 4;
+        if len > MAX_ID_LEN || i + len > payload.len() {
+            break;
+        }
+        count += 1;
+        if count > MAX_IDS_PER_OP {
+            return false;
+        }
+        i += len;
+    }
+    true
+}
+
+/// Decode an [`encode_id_list`] payload, capped at [`MAX_IDS_PER_OP`].
+///
+/// Tolerant by design: malformed input yields the ids parsed so far rather than
+/// failing or panicking (AGENTS.md → "No unwrap/panic"). A truncated payload is
+/// a partial list, never a crash. Acceptance paths must ALSO call
+/// [`id_list_count_within_bounds`], or an over-long list is silently truncated
+/// into a valid-looking op.
+pub fn decode_id_list(payload: &[u8]) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut i = 0;
+    while i + 4 <= payload.len() && ids.len() < MAX_IDS_PER_OP {
+        let len = u32::from_le_bytes([payload[i], payload[i + 1], payload[i + 2], payload[i + 3]])
+            as usize;
+        i += 4;
+        if len > MAX_ID_LEN || i + len > payload.len() {
+            break;
+        }
+        if let Ok(s) = std::str::from_utf8(&payload[i..i + len]) {
+            ids.push(s.to_owned());
+        }
+        i += len;
+    }
+    ids
 }
 
 /// Shard-context tag for the **user shard**, mixed into every user-shard
@@ -152,6 +296,13 @@ impl SignedOp {
 /// pass its own distinct context, so an op signed for one shard type can never
 /// verify against another.
 pub const USER_SHARD_CONTEXT: &[u8] = b"raven:user-shard:v1";
+
+/// Shard-context tag for the **global index**, mixed into every retraction
+/// signed against the public timeline. Distinct from the user-shard context so
+/// a retraction meant for one cannot be replayed into the other — the two have
+/// different authorization rules (owner-writes vs. author-conditional), so a
+/// signature valid for one must not carry into the other.
+pub const GLOBAL_INDEX_CONTEXT: &[u8] = b"raven:global-index:v1";
 
 /// Shard-context tag for the **inbox shard**, mixed into every inbox-shard
 /// owner-prune `SignedOp` signature. Distinct from [`USER_SHARD_CONTEXT`] so an
@@ -179,6 +330,19 @@ pub const MAX_DISPLAY_NAME_LEN: usize = 64;
 pub const MAX_HANDLE_LEN: usize = 32;
 pub const MAX_BIO_LEN: usize = 280;
 pub const MAX_AVATAR_LEN: usize = 64;
+
+/// Cap on how many targets a single [`OpType::Follow`] / [`OpType::Unfollow`] op
+/// may carry, so one op cannot blow the follow set in a single write. The user
+/// shard rejects an over-cap op outright (fail closed, never truncate), so a
+/// signer that exceeds this produces a signature the contract silently drops —
+/// which is why it lives here, shared by the contract and the delegate that
+/// builds the op, rather than being restated on each side.
+pub const MAX_FOLLOW_TARGETS_PER_OP: usize = 1_000;
+
+/// Maximum length of a followed-key hex string. An ML-DSA-65 verifying key is
+/// 1952 bytes → 3904 hex chars. Over-long targets are skipped per-key (the op
+/// itself still applies), so this is a per-target filter, not a fail-closed cap.
+pub const MAX_TARGET_KEY_LEN: usize = 3904;
 
 impl Profile {
     /// Whether every field is within its bound.

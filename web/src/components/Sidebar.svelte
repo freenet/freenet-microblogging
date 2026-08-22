@@ -72,12 +72,18 @@
       .toUpperCase();
   }
 
+  const ICON_ROADMAP = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M3 5h6"/><path d="M3 10h11"/><path d="M3 15h8"/>
+  <circle cx="16" cy="5" r="1.6"/><circle cx="17" cy="15" r="1.6"/>
+</svg>`;
+
   type NavSpec = { id: SidebarView; icon: string; label: string; badge?: boolean };
   const items: NavSpec[] = [
     { id: "feed", icon: ICON_HOME, label: "Home" },
     { id: "explore", icon: ICON_EXPLORE, label: "Explore" },
     { id: "notifications", icon: ICON_BELL, label: "Notifications", badge: true },
     { id: "profile", icon: ICON_PROFILE, label: "Profile" },
+    { id: "roadmap", icon: ICON_ROADMAP, label: "Roadmap" },
     { id: "settings", icon: ICON_SETTINGS, label: "Settings" },
   ];
 

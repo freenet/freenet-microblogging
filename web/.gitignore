@@ -1,2 +1,8 @@
 node_modules/
-dist/
+dist/*
+# The signed loader is tracked on purpose — scripts/node-e2e.sh and
+# multi-node-e2e.sh snapshot and restore it around a run, so it belongs to the
+# release artifact set rather than to build output. Ignoring `dist/` as a
+# directory made that impossible to express, because git does not descend into
+# an excluded directory to see a `!` exception.
+!dist/index.html

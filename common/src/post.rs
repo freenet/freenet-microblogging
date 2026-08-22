@@ -89,12 +89,14 @@ pub struct Post {
 /// `validate_state` and the UI.
 pub const MAX_CONTENT_LEN: usize = 280;
 
-/// Maximum author display name, in UTF-8 bytes. Mirrors the profile
-/// register's `MAX_DISPLAY_NAME_LEN` in `signed_op.rs`.
+/// Maximum author display name, in UTF-8 bytes. Mirrors the profile register's
+/// [`MAX_DISPLAY_NAME_LEN`](crate::signed_op::MAX_DISPLAY_NAME_LEN): the same
+/// value shown in the same place in the UI should be bounded the same way, or
+/// the looser surface silently becomes the one that gets used.
 pub const MAX_AUTHOR_NAME_LEN: usize = 64;
 
-/// Maximum author handle, in UTF-8 bytes. Mirrors `MAX_HANDLE_LEN` in
-/// `signed_op.rs`.
+/// Maximum author handle, in UTF-8 bytes. Mirrors
+/// [`MAX_HANDLE_LEN`](crate::signed_op::MAX_HANDLE_LEN).
 pub const MAX_AUTHOR_HANDLE_LEN: usize = 32;
 
 /// Maximum length of `reply_to` / `quoted_post`, in UTF-8 bytes. Both are
@@ -555,6 +557,13 @@ mod test {
     fn within_bounds_rejects_oversized_author_handle() {
         let mut p = sample();
         p.author_handle = "x".repeat(MAX_AUTHOR_HANDLE_LEN + 1);
+        assert!(!p.within_bounds());
+    }
+
+    #[test]
+    fn within_bounds_still_rejects_oversized_content() {
+        let mut p = sample();
+        p.content = "x".repeat(MAX_CONTENT_LEN + 1);
         assert!(!p.within_bounds());
     }
 

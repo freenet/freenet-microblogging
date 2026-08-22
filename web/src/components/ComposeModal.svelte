@@ -1,8 +1,7 @@
 <script lang="ts">
   import type { Post } from "../types";
   import { identity } from "../stores/freenet";
-
-  const MAX_CHARS = 300;
+  import { MAX_CONTENT_BYTES, contentLength } from "../utils";
 
   const ICON_CLOSE = `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
   <line x1="4" y1="4" x2="14" y2="14"/>
@@ -49,7 +48,10 @@
 
   let textareaEl: HTMLTextAreaElement | undefined = $state();
 
-  const remaining = $derived(MAX_CHARS - text.length);
+  // Budget in UTF-8 bytes, matching what the contract enforces. The old
+  // `MAX_CHARS - text.length` was wrong twice over: the cap was 300 against a
+  // contract limit of 280, and `.length` under-counts every non-ASCII character.
+  const remaining = $derived(MAX_CONTENT_BYTES - contentLength(text));
   const empty = $derived(text.trim().length === 0);
   const postDisabled = $derived((empty && !quoted) || remaining < 0);
 
@@ -68,7 +70,7 @@
 
   function submit(): void {
     const content = text.trim();
-    if (content.length > MAX_CHARS) return;
+    if (contentLength(content) > MAX_CONTENT_BYTES) return;
     if (content.length === 0 && !quoted) return;
     onSubmit(content, quoted ? false : shareChecked);
     close();

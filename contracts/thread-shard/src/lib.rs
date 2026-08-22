@@ -138,6 +138,9 @@ fn verify_writer_cert(cert: Option<&WriterCert>) -> bool {
 fn reply_is_acceptable(post: &Post, root: &str) -> bool {
     !root.is_empty()
         && post.reply_to == root
+        // Bounds author name/handle too, not just content: this is an
+        // anyone-writes surface, so an unbounded author field is a write
+        // primitive for anybody with a keypair, not just self-harm.
         && post.within_bounds()
         && post.verify().is_ok()
         && verify_writer_cert(None)
