@@ -122,7 +122,7 @@ jobs:
         run: cargo make test-ui-playwright
       - name: Upload Playwright report on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: |
@@ -193,7 +193,7 @@ jobs:
         run: PLAYWRIGHT_PROJECT=chromium cargo make test-ui-node-e2e
       - name: Upload node-e2e report on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report-node
           path: |
