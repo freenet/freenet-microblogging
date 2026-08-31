@@ -22,5 +22,5 @@ panic = 'abort'
 # Pinned exact (=x.y.z) for contract build isolation: a freenet-stdlib bump
 # rotates contract WASM hashes, so it must be deliberate and paired with the
 # migration story. See AGENTS.md → "Contract migration".
-freenet-stdlib = { version = "=0.6.1", default-features = false, features = ["contract"] }
+freenet-stdlib = { version = "=0.8.5", default-features = false, features = ["contract"] }
 freenet-microblogging-common = { path = "common" }
