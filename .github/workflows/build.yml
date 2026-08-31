@@ -30,7 +30,7 @@ jobs:
           fi
       - name: Cache cargo-installed binaries
         id: cache-bins
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/cargo-make
@@ -81,7 +81,7 @@ jobs:
             web/tests/package-lock.json
       - name: Cache cargo-installed binaries
         id: cache-bins
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/cargo-make
@@ -106,7 +106,7 @@ jobs:
         working-directory: web/tests
       - name: Cache Playwright browsers
         id: cache-playwright
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-1.48.0-chromium-firefox-webkit
@@ -155,7 +155,7 @@ jobs:
             web/tests/package-lock.json
       - name: Cache cargo-installed binaries
         id: cache-bins
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/cargo-make
@@ -182,7 +182,7 @@ jobs:
           npm install --prefix web/tests
       - name: Cache Playwright browsers
         id: cache-playwright
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-1.48.0-chromium-nodee2e
