@@ -13,10 +13,10 @@ freenet-stdlib = { workspace = true }
 freenet-microblogging-common = { workspace = true }
 # ML-DSA-65 (FIPS 204, NIST level 3) — post-quantum signatures, matching
 # freenet/freenet-email. Pinned exact for WASM build isolation.
-ml-dsa = { version = "=0.1.0-rc.8", default-features = false, features = ["alloc"] }
+ml-dsa = { version = "=0.1.1", default-features = false, features = ["alloc"] }
 hex = "=0.4.3"
 serde = { version = "=1.0.228", features = ["derive"] }
-serde_json = "=1.0.149"
+serde_json = "=1.0.151"
 
 [lib]
 crate-type = ["cdylib"]

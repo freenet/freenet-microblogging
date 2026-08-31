@@ -11,10 +11,10 @@ serde = { version = "1", features = ["derive"] }
 # Post identity + content-address. ML-DSA-65 for post signatures (ADR-0001);
 # blake3 for the content-addressed post ID. Pinned exact: these influence
 # contract WASM output via the shared post record. See AGENTS.md → "Build isolation".
-ml-dsa = { version = "=0.1.0-rc.8", default-features = false, features = ["alloc"] }
-blake3 = { version = "=1.8.4", default-features = false }
+ml-dsa = { version = "=0.1.1", default-features = false, features = ["alloc"] }
+blake3 = { version = "=1.8.7", default-features = false }
 hex = "=0.4.3"
 
 [dev-dependencies]
-serde_json = "=1.0.149"
-ml-dsa = { version = "=0.1.0-rc.8", default-features = false, features = ["alloc", "rand_core"] }
+serde_json = "=1.0.151"
+ml-dsa = { version = "=0.1.1", default-features = false, features = ["alloc", "rand_core"] }

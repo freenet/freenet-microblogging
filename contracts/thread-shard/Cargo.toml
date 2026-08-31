@@ -14,13 +14,13 @@ freenet-microblogging-common = { workspace = true }
 freenet-stdlib = { workspace = true, features = ["contract"] }
 hex = "=0.4.3"
 serde = "=1.0.228"
-serde_json = "=1.0.149"
+serde_json = "=1.0.151"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dev-dependencies]
-ml-dsa = { version = "=0.1.0-rc.8", default-features = false, features = ["alloc", "rand_core"] }
+ml-dsa = { version = "=0.1.1", default-features = false, features = ["alloc", "rand_core"] }
 
 [features]
 default = ["freenet-main-contract"]
