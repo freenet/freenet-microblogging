@@ -15,7 +15,7 @@ ed25519-dalek = { version = "2.1.1", default-features = false, features = ["allo
 
 [dev-dependencies]
 ed25519-dalek = { version = "2.1.1", default-features = false, features = ["alloc", "rand_core"] }
-rand = { version = "0.8", features = ["std", "std_rng"] }
+rand = { version = "0.10", features = ["std", "std_rng"] }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
