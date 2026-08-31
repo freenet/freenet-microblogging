@@ -89,7 +89,7 @@ jobs:
           echo "published-contract/ is in sync with source"
       - name: Upload rebuilt snapshot on drift
         if: failure() && steps.drift.outcome == 'failure'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: published-contract-rebuilt
           path: published-contract/
@@ -108,7 +108,7 @@ jobs:
       # recompute facade-id.txt and commit a deliberate snapshot refresh.
       - name: Upload rebuilt facade.wasm on drift
         if: failure() && steps.facade-verify.outcome == 'failure'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: facade-wasm-rebuilt-${{ github.sha }}
           path: contracts/facade/target/wasm32-unknown-unknown/release/freenet_microblogging_facade.wasm
