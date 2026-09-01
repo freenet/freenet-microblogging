@@ -410,24 +410,6 @@ export class FreenetConnection {
    * the owner VK changes (identity switch) so the new shard re-initialises. */
   private userShardInitOwner: string | null = null;
   /**
-   * Serialises every `api.get()` so at most one GET is in flight at a time.
-   *
-   * The stdlib resolves GET promises from a single FIFO queue with NO request
-   * correlation: the Nth `GetResponse`/`NotFound` to arrive settles the Nth
-   * pending `get()` promise, regardless of which contract it was for. With
-   * multiple concurrent shard flows live (user-shard probe/load, per-thread
-   * probe/like-refresh) two in-flight GETs can have their responses swapped —
-   * a thread GET resolving the user-shard probe (→ feed never instantiates) or
-   * a like-refresh popping a thread probe (→ that thread never PUT, the like is
-   * silently lost). Routing-by-key in `handleGetResponse` fixes WHICH handler
-   * runs, but not WHICH awaited promise settles. The only robust fix without
-   * stdlib request-ids is to never have two GETs outstanding: each `api.get()`
-   * awaits the previous one's settle. (The prior `startupDone` barrier only
-   * covered startup-time traffic, which #33 removed — it serialised nothing
-   * against the real post-init concurrency.)
-   */
-  private getChain: Promise<unknown> = Promise.resolve();
-  /**
    * Per-thread shard keys, lazily derived the first time a post is liked. Keyed
    * by root post id (the thread-shard parameter). A thread shard is parameterized
    * by its root post id, so its key = blake3(thread_code_hash || utf8(post_id)).
@@ -455,10 +437,18 @@ export class FreenetConnection {
   /**
    * Set once a subscribe was issued AFTER a successful global-index GET. The
    * boot-time subscribe is rejected by the node when the singleton is not yet
-   * instantiated ("contract WASM not cached locally") and that rejection never
-   * surfaces to the stdlib promise — so the only reliable point to subscribe
-   * is right after a GET succeeded (the contract is then cached locally and
-   * the node accepts). See #50.
+   * instantiated ("contract WASM not cached locally"), so the reliable point to
+   * subscribe is right after a GET succeeded (the contract is then cached
+   * locally and the node accepts). See #50.
+   *
+   * The original reason was stronger: before freenet-stdlib 0.4.0 `subscribe()`
+   * resolved as soon as the request was SENT and could never reject, so the
+   * refusal was invisible client-side. Since 0.4.0 it waits for the host's
+   * `SubscribeResponse` and rejects on refusal, so the failure is now
+   * observable — but this flag is still set optimistically before the subscribe
+   * settles, so a refused post-GET subscribe is not retried. Behaviour is
+   * unchanged from the pre-0.4.0 code; using the new rejection signal to retry
+   * would be a genuine improvement, tracked separately.
    */
   private globalIndexSubscribedAfterGet = false;
   /** Periodic public-timeline re-GET fallback (see startGlobalIndexRefresh). */
@@ -548,39 +538,44 @@ export class FreenetConnection {
   }
 
   /**
-   * Issue a GET serialised behind {@link getChain}, so it is the only GET in
-   * flight when its response arrives — defeating the stdlib's uncorrelated FIFO
-   * response queue.
+   * Issue a GET with a soft caller-visible deadline.
    *
-   * CRITICAL: the chain must advance on the UNDERLYING `api.get()` settle, not
-   * on a shorter app-level timeout. The stdlib keeps the GET registered in its
-   * `pendingGets` FIFO until either a real GetResponse/NotFound or its OWN
-   * `REQUEST_TIMEOUT_MS` (30 s) fires. If we advanced the chain on a 8 s app
-   * timeout we would issue the next `api.get()` while the timed-out one is still
-   * in `pendingGets` → two entries → a late response pops the wrong promise
-   * (the very misroute this exists to prevent). So `getChain` chains on the raw
-   * stdlib promise `p`; the chain can only advance once the stdlib entry is
-   * truly gone, and a genuinely hung GET still drains via the stdlib's 30 s
-   * reject. The caller's optional `ms` is a SOFT view (resolve/reject the caller
-   * early) that does NOT release the next GET.
+   * GETs used to be serialised behind a promise chain so only one was ever in
+   * flight. That was a workaround for freenet-stdlib <= 0.3.0, which resolved
+   * GET promises from a FIFO queue with NO request correlation: the Nth
+   * `GetResponse`/`NotFound` to arrive settled the Nth pending `get()`,
+   * whichever contract it was for. Two concurrent GETs could therefore swap
+   * answers — a thread GET resolving the user-shard existence probe (→ the
+   * shard is never PUT and the feed never instantiates), or a like-refresh
+   * popping a thread probe (→ that thread never PUT, the like silently lost).
+   * Routing-by-key in `handleGetResponse` fixed WHICH handler ran, but not
+   * WHICH awaited promise settled, and it is the promise that drives our
+   * probe-then-PUT decisions.
+   *
+   * freenet-stdlib 0.4.0 correlates responses to requests by contract key
+   * (freenet/freenet-stdlib#105), so a GET for contract A can no longer settle
+   * a pending GET for contract B; an unmatched response is dropped rather than
+   * mis-delivered. The serialisation is therefore obsolete for the
+   * cross-contract case, and it cost real latency — every GET waited out the
+   * previous one, including the full 30 s stdlib timeout of a hung GET.
+   *
+   * SAME-KEY CAVEAT (freenet/freenet-stdlib#96): correlation is by contract
+   * key, so two requests for the SAME key are indistinguishable and one
+   * response settles both. That is benign for every GET here — same contract,
+   * same answer either way — and the existence probes read only
+   * resolve-vs-reject, never the payload (state reaches the app through the
+   * `onContractGet` handler, which routes by key itself). Note also that
+   * abandoning a request at `ms` does not cancel it node-side, so a late answer
+   * can settle a same-key retry; again benign for a read. Do NOT extend this
+   * reasoning to PUT, where settling both callers is a real mis-report.
+   *
+   * `ms` is a SOFT bound: it settles the CALLER early, while the underlying
+   * stdlib GET keeps its slot until a real response or the stdlib's own 30 s
+   * timeout. (`ms === 0` disables it — the caller awaits the raw GET.)
    */
-  private serializedGet(req: GetRequest, ms = 8000): Promise<GetResponse> {
+  private boundedGet(req: GetRequest, ms = 8000): Promise<GetResponse> {
     if (!this.api) return Promise.reject(new Error("no api"));
-    const api = this.api;
-    // The raw stdlib GET — its settle is what owns a `pendingGets` slot.
-    const p = this.getChain.then(
-      () => api.get(req),
-      () => api.get(req),
-    );
-    // Advance the chain ONLY when the stdlib GET itself settles (entry drained),
-    // never on the soft app timeout below.
-    this.getChain = p.then(
-      () => undefined,
-      () => undefined,
-    );
-    // Caller sees a soft 8 s bound; the underlying GET keeps its stdlib slot
-    // until it really settles, so the chain stays correct even if the caller
-    // gave up. (`ms === 0` disables the soft timeout — caller awaits the raw GET.)
+    const p = this.api.get(req);
     return ms > 0 ? this.withTimeout(p, ms) : p;
   }
 
@@ -604,7 +599,7 @@ export class FreenetConnection {
     // The feed is sourced solely from the owner's user shard. index.ts refreshes
     // via loadState after a publish, so this targets the same key writes go to.
     if (!this.api || !this.userShardKey) return;
-    this.serializedGet(new GetRequest(this.userShardKey, true)).catch((e) =>
+    this.boundedGet(new GetRequest(this.userShardKey, true)).catch((e) =>
       console.error("[freenet] Get request failed:", e)
     );
   }
@@ -733,7 +728,7 @@ export class FreenetConnection {
         }
         const key = this.followedShardKeys.get(followedNotifOwner);
         if (key) {
-          this.serializedGet(new GetRequest(key, false)).catch(() => {
+          this.boundedGet(new GetRequest(key, false)).catch(() => {
             // Unreachable followed shard: keep the last known posts.
           });
         }
@@ -837,10 +832,10 @@ export class FreenetConnection {
     }
     this.userShardInitOwner = owner;
     try {
-      // GET-response ordering is handled by serializedGet (one GET in flight at
-      // a time), so shard init no longer needs a startup barrier — it can issue
-      // its probe/load GETs concurrently with any other flow and the chain
-      // keeps each GET's response matched to its own promise.
+      // GET responses are correlated to their request by contract key inside
+      // freenet-stdlib (>= 0.4.0), so shard init needs no startup barrier and
+      // no serialisation — it can issue its probe/load GETs concurrently with
+      // any other flow and each response still settles its own promise.
       const vkBytes = hexToBytes(owner);
       this.userShardKey = deriveShardContractKey(codeHash, vkBytes);
       this.userShardInstanceId = this.userShardKey.encode();
@@ -879,7 +874,7 @@ export class FreenetConnection {
   private async userShardExists(): Promise<boolean> {
     if (!this.api || !this.userShardKey) return false;
     try {
-      await this.serializedGet(new GetRequest(this.userShardKey, false));
+      await this.boundedGet(new GetRequest(this.userShardKey, false));
       return true;
     } catch {
       return false;
@@ -919,7 +914,7 @@ export class FreenetConnection {
 
   private loadUserShard(): void {
     if (!this.api || !this.userShardKey) return;
-    this.serializedGet(new GetRequest(this.userShardKey, true)).catch((e) =>
+    this.boundedGet(new GetRequest(this.userShardKey, true)).catch((e) =>
       console.error("[user-shard] get failed:", e),
     );
   }
@@ -1206,7 +1201,7 @@ export class FreenetConnection {
     for (const ownerHex of this.following) {
       const key = this.followedShardKeyFor(ownerHex);
       if (!key) continue;
-      this.serializedGet(new GetRequest(key, true)).then(
+      this.boundedGet(new GetRequest(key, true)).then(
         () => {
           if (this.subscribedFollowed.has(ownerHex)) return;
           this.subscribedFollowed.add(ownerHex);
@@ -1276,7 +1271,7 @@ export class FreenetConnection {
   ): Promise<void> {
     if (!this.api) throw new Error("no api");
     try {
-      await this.serializedGet(new GetRequest(key, false));
+      await this.boundedGet(new GetRequest(key, false));
       return; // already instantiated
     } catch {
       // not found / timeout → PUT below (a spurious re-PUT merges to a no-op)
@@ -1332,12 +1327,13 @@ export class FreenetConnection {
     // so it is the reliable "read path ran on a live node" marker, distinct from
     // the "[freenet] Loaded N …" success log emitted only on a populated index.
     console.log("[global-index] loading public timeline");
-    this.serializedGet(new GetRequest(key, true)).then(
+    this.boundedGet(new GetRequest(key, true)).then(
       () => {
         // The GET cached the contract locally, so a subscribe is now accepted
         // by the node. The boot-time attempt below is rejected on a fresh
-        // network (singleton not instantiated yet) and that rejection is
-        // invisible client-side — this post-GET retry is the reliable one.
+        // network (singleton not instantiated yet); since freenet-stdlib 0.4.0
+        // that rejection is at least logged by subscribeGlobalIndex's catch,
+        // but this post-GET retry is still the one that actually lands.
         this.subscribeGlobalIndexAfterGet();
       },
       (e) => console.error("[global-index] get failed:", e),
@@ -1425,7 +1421,7 @@ export class FreenetConnection {
     if (this.globalIndexEnsurePromise) return this.globalIndexEnsurePromise;
     this.globalIndexEnsurePromise = (async () => {
       try {
-        await this.serializedGet(new GetRequest(key, false));
+        await this.boundedGet(new GetRequest(key, false));
         this.globalIndexEnsured = true;
         return; // already instantiated
       } catch {
@@ -1648,7 +1644,7 @@ export class FreenetConnection {
     if (!this.api) return;
     const key = this.threadKeyFor(rootPostId);
     if (!key) return;
-    this.serializedGet(new GetRequest(key, true)).catch((e) =>
+    this.boundedGet(new GetRequest(key, true)).catch((e) =>
       console.error("[thread] like refresh GET failed:", e),
     );
   }
