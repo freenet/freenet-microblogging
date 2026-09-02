@@ -164,7 +164,7 @@ const flush = () => new Promise<void>((r) => setTimeout(r, 0));
 
 /**
  * Resolve every GET that appears over a few flush cycles as "exists", letting
- * fire-and-forget serializedGet chains (e.g. recordQuoteRef → ensureThreadShard)
+ * fire-and-forget GET chains (e.g. recordQuoteRef → ensureThreadShard)
  * make progress without depending on exact ordering. Returns the index of the
  * last GET resolved.
  */
@@ -201,123 +201,118 @@ afterEach(() => {
 });
 
 describe("FreenetConnection", () => {
-  describe("serializedGet — single GET in flight (H-1 anti-misroute guarantee)", () => {
-    // This is the core property the H-1 fix restores: at most one api.get() is
-    // outstanding, so the stdlib's uncorrelated FIFO response queue can never
-    // settle the wrong awaited promise. If serialisation regresses, two GETs
-    // overlap and responses can be swapped (feed never instantiates / likes
-    // silently lost).
-    it("does not issue the 2nd GET until the 1st settles", async () => {
+  describe("boundedGet — concurrent GETs + soft caller deadline", () => {
+    // GETs used to be serialised behind a promise chain (one in flight at a
+    // time) because freenet-stdlib <= 0.3.0 settled GET promises from an
+    // uncorrelated FIFO queue, so two overlapping GETs could swap answers.
+    // freenet-stdlib 0.4.0 correlates responses to requests by contract key
+    // (freenet/freenet-stdlib#105), so the serialisation is gone and these
+    // tests pin what replaced it: GETs overlap freely, and each caller still
+    // gets its own soft deadline.
+    //
+    // `instanceOf` reads the contract instance bytes off a recorded GetRequest,
+    // so a test can prove two concurrent GETs really do address DIFFERENT
+    // contracts — the exact case the old serialisation existed to protect.
+    const instanceOf = (req: GetRequest): string =>
+      JSON.stringify(
+        Array.from(
+          (req as unknown as { key?: { instance?: { data?: number[] } } }).key
+            ?.instance?.data ?? [],
+        ),
+      );
+
+    it("issues a 2nd GET for a DIFFERENT contract while the 1st is in flight", async () => {
       const { conn, api } = makeConnection();
 
-      // Two independent GET-issuing flows started back-to-back: a user-shard
-      // load and a thread like-refresh. Both go through serializedGet.
-      conn.setUser(OWNER_VK, "Alice", "alice"); // -> initUserShard -> probe GET
-      // refreshLikesNow is private; drive it via the public update-notification
-      // path would debounce, so reach it through likePost is heavier. Instead
-      // issue a second user-shard load via loadState() once the shard key is set.
+      // Flow 1: user-shard existence probe.
+      conn.setUser(OWNER_VK, "Alice", "alice");
       await flush();
-
-      // Exactly one GET in flight after kicking off the first flow.
       expect(api.getCalls.length).toBe(1);
 
-      // Start a SECOND serialised GET (another load). It must NOT call api.get()
-      // yet — it's queued behind the first on getChain.
-      conn.loadState();
+      // Flow 2: a like, which probes that post's THREAD shard. Under the old
+      // serialisation this stayed queued until the user-shard probe settled;
+      // it must now go out immediately.
+      const likePromise = conn.likePost("post-1", true);
       await flush();
-      expect(api.getCalls.length).toBe(1); // still only the first
-
-      // Settle the first GET (reject = not-found probe). Chain advances.
-      api.getCalls[0].reject(new Error("not found"));
-      await flush();
-      await flush();
-
-      // Now the second GET is allowed out.
       expect(api.getCalls.length).toBe(2);
-    });
 
-    it("advances the chain even when a GET rejects (no wedge)", async () => {
-      const { conn, api } = makeConnection();
+      // The two in-flight GETs really are for different contracts — this is the
+      // case stdlib 0.4.0's key correlation makes safe.
+      expect(instanceOf(api.getCalls[0].req)).not.toBe(
+        instanceOf(api.getCalls[1].req),
+      );
 
-      // Establish the user-shard key cleanly: resolve initUserShard's probe so
-      // it treats the shard as existing (no PUT/fetch), then it issues its own
-      // loadUserShard GET. Settle that too so the chain is idle and the key set.
-      conn.setUser(OWNER_VK, "Alice", "alice");
-      await flush();
-      expect(api.getCalls.length).toBe(1); // the probe
-      api.getCalls[0].resolve({} as GetResponse); // exists -> no PUT
-      await flush();
-      await flush();
-      expect(api.getCalls.length).toBe(2); // loadUserShard GET issued
+      // Each caller settles from its OWN response: resolve only the thread
+      // probe and the like completes while the user-shard probe is still open.
       api.getCalls[1].resolve({} as GetResponse);
-      await flush();
-      await flush();
-
-      // Now drive two serialised loadState() GETs. Reject the first: a wedged
-      // chain would block the second forever; the fix advances getChain on
-      // settle either way.
-      conn.loadState();
-      await flush();
-      expect(api.getCalls.length).toBe(3);
-      conn.loadState();
-      await flush();
-      expect(api.getCalls.length).toBe(3); // queued behind the (rejecting) #3
-
-      api.getCalls[2].reject(new Error("timeout"));
-      await flush();
-      await flush();
-      // The second load got out despite the rejection -> chain not wedged.
-      expect(api.getCalls.length).toBe(4);
+      expect(await likePromise).toBe(true);
+      expect(api.getCalls.length).toBe(2); // no extra GET was needed
     });
 
-    it("each caller sees its own GET outcome (resolve), then chain continues", async () => {
+    it("does not let one stalled GET block later GETs", async () => {
       const { conn, api } = makeConnection();
+
+      // Establish the user-shard key without triggering a PUT (which would need
+      // a `fetch` for the wasm): resolve the probe as existing, then its load.
       conn.setUser(OWNER_VK, "Alice", "alice");
       await flush();
-      expect(api.getCalls.length).toBe(1);
-
-      conn.loadState();
-      await flush();
-      expect(api.getCalls.length).toBe(1);
-
-      // Resolve the first probe GET successfully -> userShardExists() true ->
-      // no PUT; chain advances and releases the queued load.
       api.getCalls[0].resolve({} as GetResponse);
       await flush();
       await flush();
       expect(api.getCalls.length).toBe(2);
+      api.getCalls[1].resolve({} as GetResponse);
+      await flush();
+      await flush();
+
+      // Three loads back to back, none settled. All three must be out; under
+      // the old chain only the first would have been issued.
+      conn.loadState();
+      conn.loadState();
+      conn.loadState();
+      await flush();
+      expect(api.getCalls.length).toBe(5);
     });
 
-    // Regression guard for H-A (skeptical review of PR #35): the soft 8 s app
-    // timeout MUST NOT advance the chain, because the stdlib keeps the timed-out
-    // GET in its `pendingGets` FIFO until a real response or its OWN 30 s reject.
-    // If the chain advanced on the soft timeout, the next api.get() would be
-    // issued while the stale entry is still queued → two entries → a late
-    // response pops the wrong promise (the misroute this fix exists to prevent).
-    it("does NOT advance the chain on the soft timeout — only on the real GET settle", async () => {
+    // The soft deadline is the one caller-visible behaviour of the old
+    // serializedGet that is deliberately PRESERVED: a caller waiting on a GET
+    // still gives up after `ms` (default 8 s) rather than waiting out the
+    // stdlib's own 30 s timeout.
+    it("still rejects the CALLER at the soft 8 s deadline", async () => {
       vi.useFakeTimers();
       try {
         const { conn, api } = makeConnection();
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-        conn.setUser(OWNER_VK, "Alice", "alice"); // probe GET in flight
+        conn.setUser(OWNER_VK, "Alice", "alice");
         await vi.advanceTimersByTimeAsync(0);
-        expect(api.getCalls.length).toBe(1);
-
-        // A second serialised GET is queued behind the (still-unsettled) probe.
-        conn.loadState();
-        await vi.advanceTimersByTimeAsync(0);
-        expect(api.getCalls.length).toBe(1);
-
-        // Fire the 8 s soft timeout WITHOUT settling the underlying GET. The
-        // stdlib entry is still live; the chain must stay blocked.
-        await vi.advanceTimersByTimeAsync(8000);
-        expect(api.getCalls.length).toBe(1); // 2nd GET still NOT issued
-
-        // Only once the real (late) GET settles does the chain advance.
         api.getCalls[0].resolve({} as GetResponse);
         await vi.advanceTimersByTimeAsync(0);
         await vi.advanceTimersByTimeAsync(0);
-        expect(api.getCalls.length).toBe(2);
+        api.getCalls[1].resolve({} as GetResponse);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(0);
+        errSpy.mockClear();
+
+        // A load whose GET never answers. loadState logs via its .catch, so the
+        // log is the observable proof the caller was released at 8 s.
+        conn.loadState();
+        await vi.advanceTimersByTimeAsync(0);
+        const stalled = api.getCalls[api.getCalls.length - 1];
+        expect(errSpy).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(8000);
+        expect(errSpy).toHaveBeenCalledWith(
+          "[freenet] Get request failed:",
+          expect.objectContaining({ message: "timeout" }),
+        );
+
+        // The soft deadline settles only the CALLER. The underlying stdlib GET
+        // still owns its slot, so a late answer must arrive harmlessly rather
+        // than throwing or producing a second caller-visible failure.
+        errSpy.mockClear();
+        stalled.resolve({} as GetResponse);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(errSpy).not.toHaveBeenCalled();
       } finally {
         vi.useRealTimers();
       }

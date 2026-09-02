@@ -568,6 +568,27 @@ per-slice reviews could not see:
     `serializedGet` chains on the raw stdlib promise and exposes the 8 s only as
     a soft caller-facing view that does not release the next GET. Regression
     guard: `does NOT advance the chain on the soft timeout`.
+  - **SUPERSEDED (freenet-stdlib 0.4.0).** The serialisation was a workaround for
+    the uncorrelated FIFO queue described above, and that defect is fixed
+    upstream: 0.4.0 correlates every host response to its request by contract
+    key (freenet/freenet-stdlib#105), so a GET for contract A can no longer
+    settle a pending GET for contract B, and an unmatched response is dropped
+    rather than mis-delivered. `serializedGet` is therefore gone, replaced by
+    `boundedGet`, which issues the GET immediately and keeps only the soft 8 s
+    caller-facing deadline. GETs now overlap, which is the point — the chain
+    made every GET wait out the previous one, including a hung GET's full 30 s
+    stdlib timeout. Pinned by the `boundedGet` tests in
+    `web/src/freenet-api.test.ts`.
+  - **Residual (freenet/freenet-stdlib#96).** Correlation is by contract key, so
+    two requests for the SAME key remain indistinguishable and one response
+    settles both; abandoning a request at the soft deadline does not cancel it
+    node-side, so a late answer can settle a same-key retry. This is benign for
+    every GET here (same contract, same answer, and the existence probes read
+    only resolve-vs-reject — state reaches the app through the `onContractGet`
+    handler, which routes by key itself). It is NOT benign for PUT, where
+    settling both callers mis-reports success; do not generalise the reasoning
+    there. The real fix is a client-generated request id echoed in every
+    terminal response, tracked in freenet/freenet-stdlib#106.
 - **Lost-like revert (M-3).** `ensureThreadShard` now awaits its PUT before the
   caller sends the like UPDATE (an UPDATE to a never-instantiated contract is
   dropped by the node), and `completeLike` re-GETs the authoritative aggregate on
